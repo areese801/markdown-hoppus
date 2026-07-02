@@ -1,0 +1,25 @@
+# Local working files
+prompt.md
+
+# Kanbaroo per-project MCP wiring (references a local token file; machine-specific)
+.mcp.json
+
+# Secrets / env
+.env
+*_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
