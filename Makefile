@@ -1,4 +1,4 @@
-.PHONY: help build publish tag lint format test clean
+.PHONY: help build publish tag lint format test run clean
 
 # markdown-hoppus is a single-package project: distribution `markdown-hoppus`,
 # import package `hoppus` (src layout). `uv build` produces the wheel + sdist
@@ -39,6 +39,9 @@ format: ## Run ruff format
 
 test: ## Run the pytest suite
 	uv run pytest
+
+run: ## Launch the app (stub notice for now)
+	uv run hoppus
 
 clean: ## Remove build artifacts
 	rm -rf dist/ build/

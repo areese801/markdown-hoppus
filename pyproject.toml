@@ -22,6 +22,23 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Text Processing :: Markup :: Markdown",
 ]
+dependencies = [
+    "textual>=0.86",
+    "rich>=13.9",
+    "markdown-it-py>=3.0",
+    "ruamel.yaml>=0.18",
+    "watchdog>=6.0",
+    "rapidfuzz>=3.10",
+    "pyperclip>=1.9",
+    "typer>=0.15",
+    "mcp>=1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
 
 # Three interchangeable entry points into the same CLI (spec §1, §10).
 [project.scripts]
