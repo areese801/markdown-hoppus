@@ -8,6 +8,9 @@ prompt.md
 .env
 *_config.json
 
+# Publishing credentials (read by the Makefile's publish target)
+set_creds*.sh
+
 # Python
 __pycache__/
 *.py[cod]
