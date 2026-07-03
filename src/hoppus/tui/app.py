@@ -14,6 +14,7 @@ config section (see ``hoppus.tui.keymap``).
 
 import os
 import subprocess
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.index.watcher import VaultWatcher
 from hoppus.naming import validate_note_name
 from hoppus.parse.links import Resolver
+from hoppus.render.browser import open_in_browser, write_preview_html
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.search.engine import SearchResult
 from hoppus.system import SystemOpenError, open_in_system_app
@@ -723,8 +725,30 @@ class HoppusApp(App[None]):
         self.notify("Opened in system app", severity="information", timeout=3)
 
     def action_open_browser(self) -> None:
-        """Open in browser (later story)."""
-        self._not_implemented("Open in browser")
+        """
+        Render the active note locally and open it in the browser
+        (spec §9.5, HOPPUS-56).
+
+        Renders with markdown-it-py + Pygments to a temp HTML file and
+        opens its ``file://`` URL — no content leaves the machine.
+        Fully guarded: no active note or a render/open failure notifies
+        instead of crashing.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        path = Path(note_path)
+        try:
+            text = path.read_text(encoding="utf-8")
+            html_path = write_preview_html(text, title=path.stem)
+            open_in_browser(html_path)
+        except (OSError, webbrowser.Error) as error:
+            self.notify(
+                f"Browser preview failed: {error}", severity="warning", timeout=5
+            )
+            return
+        self.notify("Opened in browser", severity="information", timeout=3)
 
     def action_link_note(self) -> None:
         """

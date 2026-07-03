@@ -9,8 +9,9 @@ HOPPUS-43), ``find`` (standalone fzf-powered fuzzy search, spec §10 / §3,
 HOPPUS-46), ``daily`` (open/create today's daily note, spec §9.9,
 HOPPUS-49), ``capture`` (quick-capture to the inbox, spec §9.11,
 HOPPUS-51), and the dispatch/skeleton for every always-available
-subcommand. Subcommands owned by later stories (``new``,
-``preview``, ``index``/``reindex``, ``mcp``) and
+subcommand. ``preview --browser`` renders locally to the browser (spec
+§9.5, HOPPUS-56). Subcommands owned by later stories (``new``,
+``preview`` without ``--browser``, ``index``/``reindex``, ``mcp``) and
 the TUI launch are registered as clearly-marked stubs so ``--help`` shows
 the full command tree.
 """
@@ -28,6 +29,12 @@ from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
 from hoppus.integrity import AuditIssue, audit_vault
+from hoppus.render.browser import (
+    go_grip_available,
+    launch_go_grip,
+    open_in_browser,
+    write_preview_html,
+)
 from hoppus.vault import Vault, discover_vaults
 
 NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
@@ -243,9 +250,40 @@ def preview(
     ),
 ) -> None:
     """
-    Render a note to the terminal or the local browser (spec §10).
+    Render a note to the terminal or the local browser (spec §10, §9.5,
+    HOPPUS-56).
+
+    With ``--browser``, renders PATH locally (markdown-it-py + Pygments,
+    GitHub-like CSS) to a temp HTML file and opens it in the browser via
+    a ``file://`` URL — no content ever leaves the machine. PATH is
+    resolved as given (absolute or relative to the current directory).
+    If ``preview.browser_renderer`` is ``go-grip`` and the binary is on
+    the PATH, rendering is delegated to it instead; the Python ``grip``
+    package is never used. The terminal preview (without ``--browser``)
+    belongs to a later story and remains stubbed.
     """
-    _stub("preview")
+    if not browser:
+        _stub("preview")
+        return
+    if path is None:
+        typer.secho("preview --browser requires a PATH", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    note = Path(path).expanduser()
+    if not note.is_file():
+        typer.secho(f"No such note: {note}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    renderer = config.get("preview", {}).get("browser_renderer", "builtin")
+    if renderer == "go-grip" and go_grip_available():
+        launch_go_grip(note)
+        typer.echo(f"Rendering {note} with go-grip (localhost)")
+        return
+
+    text = note.read_text(encoding="utf-8")
+    html_path = write_preview_html(text, title=note.stem)
+    open_in_browser(html_path)
+    typer.echo(str(html_path))
 
 
 @app.command()
