@@ -32,6 +32,7 @@ from textual.widgets import (
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
+from hoppus.index.watcher import VaultWatcher
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
@@ -167,6 +168,11 @@ class HoppusApp(App[None]):
         # HOPPUS-33's unlinked mentions will reuse it.
         self._index: Index | None = None
         self._index_root: Path | None = None
+        # Live watcher slot (spec §8/D5, HOPPUS-38). The app does not
+        # auto-start a watcher yet (HOPPUS-37 kept live watching off in
+        # headless tests); when one is enabled, self-writes route through
+        # _suppress_self_write so they never re-trigger the index pass.
+        self._watcher: VaultWatcher | None = None
 
     def compose(self) -> ComposeResult:
         """
@@ -412,6 +418,23 @@ class HoppusApp(App[None]):
         self.query_one("#left-sidebar", TabbedContent).active = "tab-tags"
 
     # -- Not-yet-implemented actions -----------------------------------------
+
+    def _suppress_self_write(self, *paths: Path) -> None:
+        """
+        Register hoppus-originated writes with the live watcher, if any
+        (spec D5, HOPPUS-38).
+
+        No-ops when no watcher is running, and never raises: a failed
+        suppression must not break the write it was guarding.
+
+        :param paths: Every path the app's own write touches.
+        """
+        if self._watcher is None:
+            return
+        try:
+            self._watcher.suppress_many(paths)
+        except Exception:
+            self.log.error(f"Failed to suppress self-write for {paths}")
 
     def _not_implemented(self, feature: str) -> None:
         """
