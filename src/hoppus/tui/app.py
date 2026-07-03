@@ -5,7 +5,8 @@ Regions: a tabbed left sidebar (Explorer · Tags · Bookmarks), a main pane
 hosting the note preview (spec §9.5), and a toggleable right sidebar
 (Backlinks). A header/status line shows the current vault name, active
 note title, and word count; a footer shows key hints. The Explorer tab
-hosts the File Explorer tree (spec §9.2); the remaining sidebar tabs are
+hosts the File Explorer tree (spec §9.2), the Bookmarks tab lists
+starred notes (spec §9.12); the remaining sidebar tabs are
 placeholders until their stories land. The keymap
 defaults come from spec §9.16 and are remappable via the ``keymap``
 config section (see ``hoppus.tui.keymap``).
@@ -32,7 +33,7 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import daily, fileops, integrity, related, templates
+from hoppus import bookmarks, daily, fileops, integrity, related, templates
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
@@ -52,6 +53,7 @@ from hoppus.tui.modals.template_picker import TemplatePickerModal
 from hoppus.tui.modals.text_prompt import TextPromptModal
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.backlinks import BacklinksPane
+from hoppus.tui.panes.bookmarks import BookmarksPane
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
 from hoppus.vault import discover_vaults
@@ -212,7 +214,7 @@ class HoppusApp(App[None]):
                 with TabPane("Tags", id="tab-tags"):
                     yield PanePlaceholder("Tag pane", id="tags-placeholder")
                 with TabPane("Bookmarks", id="tab-bookmarks"):
-                    yield PanePlaceholder("Bookmarks", id="bookmarks-placeholder")
+                    yield BookmarksPane(id="bookmarks-pane")
             yield PreviewPane(self.config, id="main-pane")
             with Vertical(id="right-sidebar"):
                 yield Static("Backlinks", classes="sidebar-title")
@@ -227,6 +229,7 @@ class HoppusApp(App[None]):
         self.vault_name = self.config.get("default_vault")
         self._refresh_problems()
         self._refresh_status_line()
+        self._refresh_bookmarks()
 
     # -- File Explorer -------------------------------------------------------
 
@@ -975,9 +978,65 @@ class HoppusApp(App[None]):
         """Quick capture (later story)."""
         self._not_implemented("Quick capture")
 
+    def _refresh_bookmarks(self) -> None:
+        """
+        Repopulate the Bookmarks pane from disk (spec §9.12, HOPPUS-52).
+
+        Fully guarded: a missing pane, missing vault, or failed index
+        build never raises — the pane is simply left as-is. Reuses the
+        cached index when it matches but never populates the cache
+        (mirroring :meth:`_refresh_problems`, so lazy pane refreshes on
+        mount don't change the app's indexing behavior under test); an
+        empty bookmark list skips the index build entirely.
+        """
+        try:
+            pane = self.query_one("#bookmarks-pane", BookmarksPane)
+        except Exception:
+            return
+        try:
+            vault_root = self._active_vault_path()
+            if not vault_root.is_dir():
+                pane.clear()
+                return
+            if not bookmarks.load_bookmarks(vault_root):
+                pane.clear()
+                return
+            if self._index is not None and self._index_root == vault_root:
+                index = self._index
+            else:
+                index = Index.build(vault_root)
+            pane.show_bookmarks(vault_root, index)
+        except Exception:
+            self.log.error("Failed to refresh bookmarks pane")
+
     def action_toggle_star(self) -> None:
-        """Star/unstar (later story)."""
-        self._not_implemented("Star/unstar")
+        """
+        Star or unstar the active note (spec §9.12, HOPPUS-52, key ``s``).
+
+        Toggles the note in ``<vault>/.hoppus/bookmarks.yaml`` via
+        :func:`hoppus.bookmarks.toggle_bookmark`, refreshes the
+        Bookmarks pane, and notifies with the new state. Guarded — no
+        active note or a failed write notifies instead of crashing.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        vault_root = self.preview.vault_root or self._active_vault_path()
+        if vault_root is None or not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        try:
+            now_starred = bookmarks.toggle_bookmark(vault_root, Path(note_path))
+        except Exception as error:
+            self.notify(f"Star/unstar failed: {error}", severity="error", timeout=5)
+            return
+        self._refresh_bookmarks()
+        self.notify(
+            "Starred" if now_starred else "Unstarred",
+            severity="information",
+            timeout=3,
+        )
 
     def action_yank_menu(self) -> None:
         """Yank menu (later story)."""
@@ -1070,3 +1129,4 @@ class HoppusApp(App[None]):
         self.note_title = None
         self.word_count = None
         self._refresh_problems()
+        self._refresh_bookmarks()
