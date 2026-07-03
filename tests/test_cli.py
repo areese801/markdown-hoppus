@@ -73,13 +73,57 @@ def test_help_exits_zero_and_lists_subcommands() -> None:
         assert subcommand in result.output
 
 
-def test_bare_invocation_prints_tui_stub() -> None:
+@pytest.fixture()
+def launched_apps(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """
-    Bare invocation (no subcommand) prints the TUI placeholder notice.
+    Patch ``HoppusApp.run`` to record the app instance instead of
+    starting a live terminal.
+
+    Args:
+        monkeypatch: pytest's monkeypatching fixture.
+
+    Returns:
+        A list that receives each ``HoppusApp`` whose ``run`` was called.
+    """
+    launched: list[Any] = []
+    monkeypatch.setattr(cli.HoppusApp, "run", lambda self: launched.append(self))
+    return launched
+
+
+def test_bare_invocation_launches_tui_on_default_vault(
+    vaults_root: Path, launched_apps: list[Any]
+) -> None:
+    """
+    Bare invocation (no subcommand) runs the real TUI on the default vault.
     """
     result = runner.invoke(cli.app, [])
     assert result.exit_code == 0
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.output
+    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.output
+    assert len(launched_apps) == 1
+    app = launched_apps[0]
+    assert app.config["default_vault"] == "Personal"
+    assert app.vaults_root == vaults_root
+
+
+def test_bare_invocation_missing_root_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched_apps: list[Any]
+) -> None:
+    """
+    Bare invocation exits 1 with a clear error when the Vaults Root is
+    missing, without launching the TUI.
+    """
+    missing = tmp_path / "does-not-exist"
+
+    def fake_load_config(vault: Path | None = None) -> dict[str, Any]:
+        """
+        Return a config pointing at a nonexistent Vaults Root.
+        """
+        return {"vaults_root": str(missing), "default_vault": "Personal"}
+
+    monkeypatch.setattr(cli, "load_config", fake_load_config)
+    result = runner.invoke(cli.app, [])
+    assert result.exit_code == 1
+    assert launched_apps == []
 
 
 def test_version_flag() -> None:
@@ -122,31 +166,42 @@ def test_vaults_missing_root_exits_nonzero(
     assert result.exit_code == 1
 
 
-def test_open_named_vault(vaults_root: Path) -> None:
+def test_open_named_vault_launches_tui(
+    vaults_root: Path, launched_apps: list[Any]
+) -> None:
     """
-    ``open VAULT`` resolves the named vault and prints the TUI stub notice.
+    ``open VAULT`` runs the real TUI on the named vault.
     """
     result = runner.invoke(cli.app, ["open", "Work"])
     assert result.exit_code == 0
-    assert "Work" in result.output
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.output
+    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.output
+    assert len(launched_apps) == 1
+    app = launched_apps[0]
+    assert app.config["default_vault"] == "Work"
+    assert app.vaults_root == vaults_root
 
 
-def test_open_defaults_to_configured_vault(vaults_root: Path) -> None:
+def test_open_defaults_to_configured_vault(
+    vaults_root: Path, launched_apps: list[Any]
+) -> None:
     """
     ``open`` without an argument falls back to the configured default vault.
     """
     result = runner.invoke(cli.app, ["open"])
     assert result.exit_code == 0
-    assert "Personal" in result.output
+    assert len(launched_apps) == 1
+    assert launched_apps[0].config["default_vault"] == "Personal"
 
 
-def test_open_unknown_vault_exits_nonzero(vaults_root: Path) -> None:
+def test_open_unknown_vault_exits_nonzero(
+    vaults_root: Path, launched_apps: list[Any]
+) -> None:
     """
-    ``open`` with an unknown vault name exits 1.
+    ``open`` with an unknown vault name exits 1 without launching the TUI.
     """
     result = runner.invoke(cli.app, ["open", "Nope"])
     assert result.exit_code == 1
+    assert launched_apps == []
 
 
 @pytest.mark.parametrize(

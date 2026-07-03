@@ -11,10 +11,11 @@ HOPPUS-49), ``capture`` (quick-capture to the inbox, spec §9.11,
 HOPPUS-51), and the dispatch/skeleton for every always-available
 subcommand. ``preview --browser`` renders locally to the browser (spec
 §9.5, HOPPUS-56). ``mcp`` launches the bundled MCP server over stdio
-(spec §11, HOPPUS-58). Subcommands owned by later stories (``new``,
-``preview`` without ``--browser``, ``index``/``reindex``) and
-the TUI launch are registered as clearly-marked stubs so ``--help`` shows
-the full command tree.
+(spec §11, HOPPUS-58). Bare invocation and ``open`` launch the real TUI
+(:class:`hoppus.tui.app.HoppusApp`, HOPPUS-68). Subcommands owned by later
+stories (``new``, ``preview`` without ``--browser``, ``index``/``reindex``)
+are registered as clearly-marked stubs so ``--help`` shows the full command
+tree.
 """
 
 from datetime import datetime
@@ -37,6 +38,7 @@ from hoppus.render.browser import (
     open_in_browser,
     write_preview_html,
 )
+from hoppus.tui.app import HoppusApp
 from hoppus.vault import Vault, discover_vaults
 
 NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
@@ -95,6 +97,34 @@ def _stub(feature: str) -> None:
     typer.echo(f"{feature}: {NOT_IMPLEMENTED_SUFFIX}")
 
 
+def _launch_tui(vault: str | None = None) -> None:
+    """
+    Resolve a vault and run the TUI on it (spec §10, HOPPUS-68).
+
+    Args:
+        vault: Vault name to open. Defaults to the configured default
+            vault.
+
+    Raises:
+        typer.Exit: With code 1 if the Vaults Root is missing or no vault
+            with the resolved name exists under it.
+    """
+    config = load_config()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = vault or config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    tui_config = {**config, "default_vault": selected.name}
+    HoppusApp(config=tui_config, vaults_root=vaults_root).run()
+
+
 @app.callback(invoke_without_command=True)
 def cli(
     ctx: typer.Context,
@@ -107,7 +137,7 @@ def cli(
         typer.echo(f"markdown-hoppus {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
-        _stub("TUI")
+        _launch_tui()
 
 
 @app.command()
@@ -131,22 +161,9 @@ def open_(
     ),
 ) -> None:
     """
-    Launch the TUI on a named vault (spec §10). TUI launch is stubbed.
+    Launch the TUI on a named vault (spec §10, HOPPUS-68).
     """
-    config = load_config()
-    vaults_root = Path(config["vaults_root"]).expanduser()
-    discovered = _discover_or_exit(vaults_root)
-    name = vault or config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    typer.echo(f"Vault: {selected.name} ({selected.path})")
-    _stub("TUI")
+    _launch_tui(vault)
 
 
 @app.command()
