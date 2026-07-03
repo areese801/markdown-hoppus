@@ -6,19 +6,22 @@ Fully implemented here: ``vaults`` (list vaults under the Vaults Root) and
 ``audit`` (report-only unresolved-wikilink report, spec §10 / §19 D1,
 HOPPUS-40), plus ``doctor`` (environment health report, spec §7.5,
 HOPPUS-43), ``find`` (standalone fzf-powered fuzzy search, spec §10 / §3,
-HOPPUS-46), and the dispatch/skeleton for every always-available
+HOPPUS-46), ``daily`` (open/create today's daily note, spec §9.9,
+HOPPUS-49), and the dispatch/skeleton for every always-available
 subcommand. Subcommands owned by later stories (``new``,
-``daily``, ``capture``, ``preview``, ``index``/``reindex``, ``mcp``) and
+``capture``, ``preview``, ``index``/``reindex``, ``mcp``) and
 the TUI launch are registered as clearly-marked stubs so ``--help`` shows
 the full command tree.
 """
 
+from datetime import datetime
 from pathlib import Path
 
 import typer
 
 from hoppus import __version__
 from hoppus.config import load_config
+from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
@@ -172,9 +175,28 @@ def new(
 @app.command()
 def daily() -> None:
     """
-    Create/print the path to today's daily note (spec §10).
+    Open (creating if needed) today's daily note (spec §10, §9.9,
+    HOPPUS-49).
+
+    Resolves the default vault, then prints the note's absolute path
+    plus a ``(created)``/``(exists)`` marker. Idempotent — a second
+    invocation reports the same file without touching it.
     """
-    _stub("daily")
+    config = load_config()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    path, created = open_or_create_daily(selected.path, config, now=datetime.now())
+    typer.echo(f"{path} ({'created' if created else 'exists'})")
 
 
 @app.command()

@@ -32,7 +32,7 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import fileops, integrity, related, templates
+from hoppus import daily, fileops, integrity, related, templates
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
@@ -839,8 +839,37 @@ class HoppusApp(App[None]):
         self.notify("Graph radius: open the graph view first (g)", timeout=3)
 
     def action_daily_note(self) -> None:
-        """Daily note (later story)."""
-        self._not_implemented("Daily note")
+        """
+        Open (creating if needed) today's daily note (spec §9.9,
+        HOPPUS-49, keybind ``d``).
+
+        Delegates path/seed logic to
+        :func:`hoppus.daily.open_or_create_daily` (the app supplies the
+        real clock). A newly created note's write is suppressed with
+        the live watcher, the vault is reindexed, and the note opens in
+        the preview. Fully guarded — failures notify, never crash.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        try:
+            path, created = daily.open_or_create_daily(
+                vault_root, self.config, now=datetime.now()
+            )
+        except OSError as error:
+            self.notify(f"Daily note: {error}", severity="error", timeout=5)
+            return
+        if created:
+            self._suppress_self_write(path)
+            self._index = Index.build(vault_root)
+            self._index_root = vault_root
+        self.notify(
+            f"Daily note {'created' if created else 'opened'}: {path.name}",
+            severity="information",
+            timeout=3,
+        )
+        self.run_worker(self.open_note(path, vault_root=vault_root), exclusive=False)
 
     def action_new_note(self) -> None:
         """
