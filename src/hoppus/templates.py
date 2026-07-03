@@ -34,6 +34,40 @@ from hoppus.fileops import create_note
 
 _TOKEN_RE = re.compile(r"\{\{(date|time)(?::([^{}]+))?\}\}|\{\{title\}\}")
 
+TEMPLATE_FOLDER_FALLBACKS = ("_templates", "templates")
+"""
+Well-known template folder names tried (in order) when the configured
+``templates.folder`` is absent. Real Obsidian vaults commonly use
+``_templates`` instead of the default ``Templates`` (HOPPUS-75 F15).
+"""
+
+
+def resolve_templates_folder(vault_root: Path, config: dict[str, Any]) -> Path:
+    """
+    Resolve the vault's templates folder, with well-known fallbacks.
+
+    The configured ``templates.folder`` (default ``Templates``) always
+    wins when it exists. When it is absent, the well-known sibling
+    names in :data:`TEMPLATE_FOLDER_FALLBACKS` are tried in order —
+    deterministic, never a scan for arbitrary folders (HOPPUS-75 F15).
+    When nothing exists, the configured (nonexistent) path is returned
+    so callers can report exactly what was looked for.
+
+    :param vault_root: The vault root directory.
+    :param config: The loaded hoppus config.
+    :returns: The resolved templates folder path (may not exist).
+    """
+    configured = vault_root / str(
+        config.get("templates", {}).get("folder", "Templates")
+    )
+    if configured.is_dir():
+        return configured
+    for name in TEMPLATE_FOLDER_FALLBACKS:
+        candidate = vault_root / name
+        if candidate.is_dir():
+            return candidate
+    return configured
+
 
 def substitute_variables(
     text: str,
@@ -78,16 +112,18 @@ def list_templates(vault_root: Path, config: dict[str, Any]) -> list[Path]:
     """
     List the vault's template files, sorted by name.
 
-    Looks for ``.md`` files directly under
-    ``vault_root / config["templates"]["folder"]``.
+    Looks for ``.md`` files directly under the folder resolved by
+    :func:`resolve_templates_folder` — the configured
+    ``templates.folder`` when it exists, otherwise the well-known
+    ``_templates``/``templates`` fallbacks (HOPPUS-75 F15).
 
     :param vault_root: The vault root directory.
     :param config: The loaded hoppus config.
     :returns: Sorted (case-insensitively by name, stable) list of
-        template paths; empty when the templates folder is absent
+        template paths; empty when no templates folder is present
         (never raises).
     """
-    folder = vault_root / str(config.get("templates", {}).get("folder", "Templates"))
+    folder = resolve_templates_folder(vault_root, config)
     if not folder.is_dir():
         return []
     return sorted(

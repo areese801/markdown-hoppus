@@ -24,6 +24,7 @@ SECTION_HEADERS = [
     "Editor:",
     "Config health:",
     "Vaults:",
+    "Templates:",
 ]
 
 
@@ -189,3 +190,37 @@ def test_doctor_missing_vaults_root_is_warning_not_exit(
     assert result.exit_code == 0
     assert "warning:" in result.output
     assert "does not exist" in result.output
+
+
+def test_doctor_reports_underscore_templates_folder_and_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    Doctor reports the resolved templates folder (the ``_templates``
+    fallback here), that it exists, and the template count
+    (HOPPUS-75 F15).
+    """
+    root = _install_fakes(monkeypatch, tmp_path, encourage=False, editor="emacs")
+    folder = root / "Personal" / "_templates"
+    folder.mkdir()
+    (folder / "meeting.md").write_text("m", encoding="utf-8")
+    (folder / "daily.md").write_text("d", encoding="utf-8")
+    result = runner.invoke(cli.app, ["doctor"])
+    assert result.exit_code == 0
+    assert f"folder: {folder} (exists)" in result.output
+    assert "templates found: 2" in result.output
+
+
+def test_doctor_reports_missing_templates_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    With no templates folder at all, doctor reports the configured path
+    as missing with zero templates — making a mismatch visible
+    (HOPPUS-75 F15).
+    """
+    root = _install_fakes(monkeypatch, tmp_path, encourage=False, editor="emacs")
+    result = runner.invoke(cli.app, ["doctor"])
+    assert result.exit_code == 0
+    assert f"folder: {root / 'Personal' / 'Templates'} (missing)" in result.output
+    assert "templates found: 0" in result.output

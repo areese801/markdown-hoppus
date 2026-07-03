@@ -14,6 +14,10 @@ which reports vault **content** health. The sections covered here:
   ``editor_support.encourage_obsidian_nvim`` (spec §7.6, §12).
 - Config health (missing folders referenced by config) and Vaults Root
   reachability / vault discovery.
+- The default vault's resolved templates folder (configured or well-known
+  ``_templates``/``templates`` fallback), whether it exists, and how many
+  templates were found — so a folder-name mismatch is visible instead of
+  silently yielding zero templates (HOPPUS-75 F15).
 
 All detection logic is pure-ish: the environment mapping, ``which``, the
 home directory, and vault discovery are injectable so the checks unit-test
@@ -28,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hoppus.integrity import resolve_editor_command
+from hoppus.templates import list_templates, resolve_templates_folder
 from hoppus.vault import Vault, discover_vaults
 
 OPTIONAL_BINARIES = ("rg", "fzf", "glow", "go-grip")
@@ -244,6 +249,11 @@ class DoctorReport:
         vaults_root: The configured Vaults Root.
         vault_names: Discovered vault names, or None on discovery error.
         vaults_error: Discovery error message, or None.
+        templates_folder: The default vault's resolved templates folder
+            (configured or well-known fallback, HOPPUS-75 F15), or None
+            when the default vault was not discovered.
+        templates_folder_exists: Whether that folder exists.
+        template_count: Number of templates found in it.
     """
 
     binaries: dict[str, str | None]
@@ -254,6 +264,9 @@ class DoctorReport:
     vaults_root: Path = Path()
     vault_names: list[str] | None = None
     vaults_error: str | None = None
+    templates_folder: Path | None = None
+    templates_folder_exists: bool = False
+    template_count: int = 0
 
 
 def run_doctor(
@@ -286,6 +299,20 @@ def run_doctor(
     )
     nudge = obsidian_nudge(config, editor_info, plugin_detected)
     vaults_root, vaults, vaults_error = check_vaults(config, discover=discover)
+
+    templates_folder: Path | None = None
+    templates_folder_exists = False
+    template_count = 0
+    default_name = str(config.get("default_vault", ""))
+    default_vault = next(
+        (vault for vault in vaults or [] if vault.name == default_name), None
+    )
+    if default_vault is not None:
+        config_dict = dict(config)
+        templates_folder = resolve_templates_folder(default_vault.path, config_dict)
+        templates_folder_exists = templates_folder.is_dir()
+        template_count = len(list_templates(default_vault.path, config_dict))
+
     return DoctorReport(
         binaries=binaries,
         editor_info=editor_info,
@@ -295,4 +322,7 @@ def run_doctor(
         vaults_root=vaults_root,
         vault_names=[vault.name for vault in vaults] if vaults is not None else None,
         vaults_error=vaults_error,
+        templates_folder=templates_folder,
+        templates_folder_exists=templates_folder_exists,
+        template_count=template_count,
     )

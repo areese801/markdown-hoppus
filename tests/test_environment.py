@@ -317,6 +317,52 @@ class TestRunDoctor:
         assert report.nudge is None
         assert report.vault_names is None
         assert report.vaults_error is not None
+        assert report.templates_folder is None
+        assert report.templates_folder_exists is False
+        assert report.template_count == 0
+
+    def test_templates_reported_for_default_vault(self, tmp_path: Path) -> None:
+        """
+        The default vault's resolved templates folder (here the
+        ``_templates`` fallback), its existence, and the template count
+        are reported (HOPPUS-75 F15).
+        """
+        vault_dir = tmp_path / "Personal"
+        folder = vault_dir / "_templates"
+        folder.mkdir(parents=True)
+        (folder / "meeting.md").write_text("m", encoding="utf-8")
+        vault = Vault(name="Personal", path=vault_dir)
+        report = run_doctor(
+            _config(encourage=False, vaults_root=str(tmp_path)),
+            environ={"EDITOR": "emacs"},
+            which=lambda name: None,
+            home=lambda: tmp_path / "home",
+            glob=lambda pattern: [],
+            discover=lambda path: [vault],
+        )
+        assert report.templates_folder == folder
+        assert report.templates_folder_exists is True
+        assert report.template_count == 1
+
+    def test_templates_missing_folder_reported(self, tmp_path: Path) -> None:
+        """
+        A vault without any templates folder reports the configured
+        path as absent with zero templates (HOPPUS-75 F15).
+        """
+        vault_dir = tmp_path / "Personal"
+        vault_dir.mkdir()
+        vault = Vault(name="Personal", path=vault_dir)
+        report = run_doctor(
+            _config(encourage=False, vaults_root=str(tmp_path)),
+            environ={"EDITOR": "emacs"},
+            which=lambda name: None,
+            home=lambda: tmp_path / "home",
+            glob=lambda pattern: [],
+            discover=lambda path: [vault],
+        )
+        assert report.templates_folder == vault_dir / "Templates"
+        assert report.templates_folder_exists is False
+        assert report.template_count == 0
 
     def test_plugin_detection_skipped_for_non_nvim_editor(self) -> None:
         """

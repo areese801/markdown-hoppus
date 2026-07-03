@@ -135,7 +135,7 @@ remappable via the `keymap` config section):
 | `hop capture [TEXT]` | Quick-capture a timestamped note to the inbox folder |
 | `hop preview PATH --browser` | Render a note locally and open it in the browser |
 | `hop audit [VAULT]` | Vault **content** health: unresolved wikilinks, broken anchors, missing attachments, broken Markdown links |
-| `hop doctor` | **Environment** health: optional binaries, editor detection, config, vault discovery |
+| `hop doctor` | **Environment** health: optional binaries, editor detection, config, vault discovery, templates folder |
 | `hop mcp` | Run the bundled MCP server over stdio |
 
 ## Configuration
@@ -144,6 +144,15 @@ Global config lives at `~/.config/hoppus/config.yaml` (XDG-aware); per-vault
 overrides at `<vault>/.hoppus/config.yaml` are deep-merged over it. Vaults are
 subdirectories of a single configurable **Vaults Root** (default `~/Notes`) —
 symlink vaults in from elsewhere if you like.
+
+On a first run with no config, commands that need a vault print exactly what
+to do: create the config file with `vaults_root` and `default_vault`, then
+run `hop doctor` to verify.
+
+Templates live in the configured `templates.folder` (default `Templates`);
+when that folder is absent, hoppus automatically falls back to a vault's
+`_templates/` or `templates/` folder, and `hop doctor` reports which folder
+was resolved and how many templates it holds.
 
 A few notable keys (missing keys fall back to sensible defaults):
 

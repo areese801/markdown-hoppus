@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 import hoppus
 from hoppus import cli
+from hoppus.config import global_config_path
 
 runner = CliRunner()
 
@@ -124,6 +125,8 @@ def test_bare_invocation_missing_root_exits_nonzero(
     result = runner.invoke(cli.app, [])
     assert result.exit_code == 1
     assert launched_apps == []
+    assert "No vault configured" in result.stderr
+    assert "hop doctor" in result.stderr
 
 
 def test_version_flag() -> None:
@@ -147,11 +150,13 @@ def test_vaults_lists_discovered_vaults(vaults_root: Path) -> None:
     assert ".hidden" not in result.output
 
 
-def test_vaults_missing_root_exits_nonzero(
+def test_vaults_missing_root_exits_nonzero_with_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    ``vaults`` exits 1 with an error when the Vaults Root does not exist.
+    ``vaults`` exits 1 and prints actionable first-run guidance naming
+    the config file, both keys, and ``hop doctor`` when the Vaults Root
+    does not exist (HOPPUS-74 F14).
     """
     missing = tmp_path / "does-not-exist"
 
@@ -164,6 +169,34 @@ def test_vaults_missing_root_exits_nonzero(
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     result = runner.invoke(cli.app, ["vaults"])
     assert result.exit_code == 1
+    assert "No vault configured" in result.stderr
+    assert str(global_config_path()) in result.stderr
+    assert "vaults_root:" in result.stderr
+    assert "default_vault:" in result.stderr
+    assert "hop doctor" in result.stderr
+
+
+def test_open_missing_root_exits_nonzero_with_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched_apps: list[Any]
+) -> None:
+    """
+    ``open`` shows the same first-run guidance instead of launching the
+    TUI onto a nonexistent Vaults Root (HOPPUS-74 F14).
+    """
+    missing = tmp_path / "does-not-exist"
+
+    def fake_load_config(vault: Path | None = None) -> dict[str, Any]:
+        """
+        Return a config pointing at a nonexistent Vaults Root.
+        """
+        return {"vaults_root": str(missing), "default_vault": "Personal"}
+
+    monkeypatch.setattr(cli, "load_config", fake_load_config)
+    result = runner.invoke(cli.app, ["open"])
+    assert result.exit_code == 1
+    assert launched_apps == []
+    assert "No vault configured" in result.stderr
+    assert "hop doctor" in result.stderr
 
 
 def test_open_named_vault_launches_tui(

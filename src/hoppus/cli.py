@@ -26,7 +26,7 @@ import typer
 
 from hoppus import __version__
 from hoppus.capture import capture_note
-from hoppus.config import load_config
+from hoppus.config import global_config_path, load_config
 from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
@@ -73,9 +73,32 @@ def _vaults_root() -> Path:
     return Path(config["vaults_root"]).expanduser()
 
 
+def _missing_root_guidance() -> str:
+    """
+    Return the actionable first-run guidance for a missing Vaults Root.
+
+    Names the exact global config file (XDG-aware, via
+    :func:`hoppus.config.global_config_path`) and the two keys required
+    to get going, and points at ``hop doctor`` (HOPPUS-74 F14).
+
+    Returns:
+        The multi-line guidance message.
+    """
+    return (
+        f"No vault configured. Create {global_config_path()} with:\n"
+        "  vaults_root: /path/to/your/vaults\n"
+        "  default_vault: <name>\n"
+        "Then run `hop doctor` to verify."
+    )
+
+
 def _discover_or_exit(vaults_root: Path) -> list[Vault]:
     """
     Discover vaults under ``vaults_root``, exiting with code 1 on failure.
+
+    On a missing or non-directory Vaults Root, prints the error plus
+    actionable first-run guidance naming the config file to create
+    (HOPPUS-74 F14) before exiting.
 
     Args:
         vaults_root: The directory expected to contain vaults.
@@ -91,6 +114,7 @@ def _discover_or_exit(vaults_root: Path) -> list[Vault]:
         return discover_vaults(vaults_root)
     except (FileNotFoundError, NotADirectoryError) as error:
         typer.secho(str(error), fg=typer.colors.RED, err=True)
+        typer.secho(_missing_root_guidance(), err=True)
         raise typer.Exit(code=1) from error
 
 
@@ -545,6 +569,14 @@ def doctor() -> None:
         typer.echo(f"  discovered: {len(names)}")
         for name in names:
             typer.echo(f"    {name}")
+
+    typer.echo("Templates:")
+    if report.templates_folder is None:
+        typer.echo("  folder: unknown (default vault not discovered)")
+    else:
+        status = "exists" if report.templates_folder_exists else "missing"
+        typer.echo(f"  folder: {report.templates_folder} ({status})")
+        typer.echo(f"  templates found: {report.template_count}")
 
 
 def main() -> None:
