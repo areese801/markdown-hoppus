@@ -36,6 +36,7 @@ from textual.widgets import (
 from hoppus import (
     bookmarks,
     capture,
+    clipboard,
     daily,
     fileops,
     integrity,
@@ -58,6 +59,7 @@ from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
 from hoppus.tui.modals.search_screen import SearchScreen
+from hoppus.tui.modals.yank_menu import YANK_BODY, YANK_PATH, YankMenuModal
 from hoppus.tui.modals.stats_screen import StatsScreen
 from hoppus.tui.modals.template_picker import TemplatePickerModal
 from hoppus.tui.modals.text_prompt import TextPromptModal
@@ -1125,8 +1127,50 @@ class HoppusApp(App[None]):
         )
 
     def action_yank_menu(self) -> None:
-        """Yank menu (later story)."""
-        self._not_implemented("Yank menu")
+        """
+        Yank the active note to the clipboard (spec §9.14, HOPPUS-54).
+
+        Opens a small menu offering Body / Path / Wikilink; the chosen
+        content is built by the pure ``hoppus.clipboard`` helpers and
+        copied via the configured backend (``clipboard.backend``:
+        ``pyperclip`` | ``osc52``). Fully guarded — no active note, a
+        read failure, or a missing clipboard tool notifies instead of
+        crashing.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        path = Path(note_path)
+        vault_root = self.preview.vault_root or self._active_vault_path()
+
+        def handle_choice(choice: str | None) -> None:
+            if choice is None:
+                return
+            try:
+                if choice == YANK_BODY:
+                    content = clipboard.yank_body(path.read_text(encoding="utf-8"))
+                elif choice == YANK_PATH:
+                    content = clipboard.yank_path(path)
+                else:
+                    index = self._active_index(vault_root)
+                    note = index.notes_by_path.get(path)
+                    if note is None:
+                        self.notify(
+                            "Yank: note not in index", severity="warning", timeout=3
+                        )
+                        return
+                    content = clipboard.yank_wikilink(note, index)
+                backend = str(
+                    self.config.get("clipboard", {}).get("backend", "pyperclip")
+                )
+                clipboard.copy(content, backend=backend)
+            except Exception as error:
+                self.notify(f"Yank failed: {error}", severity="error", timeout=5)
+                return
+            self.notify(f"Copied {choice}", severity="information", timeout=3)
+
+        self.push_screen(YankMenuModal(), handle_choice)
 
     def action_reindex(self) -> None:
         """
