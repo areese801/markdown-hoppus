@@ -33,6 +33,7 @@ carried in ``display`` and ignored here.
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -41,6 +42,9 @@ from hoppus.model import Link
 from hoppus.parse import ofm
 
 SCHEME = "hoppus"
+
+UNRESOLVED_MARKER = "⚠"
+"""Subtle label marker appended to wikilinks that fail to resolve."""
 
 _HREF_PREFIX = f"{SCHEME}://note?"
 
@@ -137,15 +141,25 @@ def _label(link: Link) -> str:
     return link.target
 
 
-def _rewrite(match: re.Match[str]) -> str:
+def _rewrite(match: re.Match[str], is_resolved: Callable[[Link], bool] | None) -> str:
     """
     Rewrite one wikilink/embed regex match as a standard Markdown link.
+
+    When an ``is_resolved`` predicate is given and rejects the link, the
+    label gains a subtle trailing ``UNRESOLVED_MARKER``. Embeds are never
+    marked — the preview pre-expands them via ``hoppus.render.transclude``,
+    which shows its own placeholders for unresolved embeds.
     """
     link = ofm._parse_wikilink(match, _SOURCE_UNUSED)
-    return f"[{_label(link)}]({encode_href(link)})"
+    label = _label(link)
+    if is_resolved is not None and not link.is_embed and not is_resolved(link):
+        label = f"{label} {UNRESOLVED_MARKER}"
+    return f"[{label}]({encode_href(link)})"
 
 
-def transform_ofm(text: str) -> str:
+def transform_ofm(
+    text: str, *, is_resolved: Callable[[Link], bool] | None = None
+) -> str:
     """
     Rewrite OFM wikilinks and embeds into standard, navigable Markdown links.
 
@@ -156,6 +170,11 @@ def transform_ofm(text: str) -> str:
     links, frontmatter, code fences, and inline code are left untouched.
 
     :param text: Full note text (frontmatter included).
+    :param is_resolved: Optional predicate reporting whether a wikilink
+        resolves in the vault. When given, unresolved wikilinks stay
+        clickable but carry a subtle ``UNRESOLVED_MARKER`` in their label
+        (spec §9.5 "subtle indicators"); embeds are skipped. When None
+        (the default), output is exactly the unmarked transform.
     :returns: The transformed Markdown, line structure preserved.
     """
     masked = ofm._mask(text)
@@ -163,7 +182,7 @@ def transform_ofm(text: str) -> str:
     cursor = 0
     for match in ofm._WIKILINK_RE.finditer(masked):
         out.append(text[cursor : match.start()])
-        out.append(_rewrite(match))
+        out.append(_rewrite(match, is_resolved))
         cursor = match.end()
     out.append(text[cursor:])
     return "".join(out)

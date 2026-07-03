@@ -16,20 +16,23 @@ decoded ``LinkTarget`` with a ``Resolver`` (spec §6.2). The app's
 from pathlib import Path
 from typing import Any
 
+from textual._slug import slug
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
+from textual.widgets.markdown import MarkdownBlock
 
 from hoppus.index.indexer import Index, build_note
 from hoppus.model import Link
 from hoppus.parse.links import Resolver
-from hoppus.render.ofm_markdown import LinkTarget
+from hoppus.render.ofm_markdown import LinkTarget, transform_ofm
 from hoppus.render.terminal import (
     render_glow,
     render_native,
     render_raw,
     select_renderer,
 )
+from hoppus.render.transclude import block_line, expand_embeds
 
 
 class PreviewPane(VerticalScroll):
@@ -51,6 +54,7 @@ class PreviewPane(VerticalScroll):
         self.note_path: Path | None = None
         self.raw_mode: bool = False
         self._text: str = ""
+        self._rendered: str | None = None
         self._vault_root: Path | None = None
         self._index: Index | None = None
 
@@ -84,6 +88,10 @@ class PreviewPane(VerticalScroll):
         """
         Load a note from disk, render it, and update the app status line.
 
+        Native rendering pre-expands ``![[...]]`` embeds into transcluded
+        content and marks unresolved wikilinks with a subtle indicator
+        (spec §9.5); raw mode keeps showing the untouched note text.
+
         Args:
             path: Path to the ``.md`` note to preview.
         """
@@ -107,6 +115,7 @@ class PreviewPane(VerticalScroll):
         self.note_path = None
         self.raw_mode = False
         self._text = ""
+        self._rendered = None
         await self.query_one("#preview-markdown", Markdown).update("")
         static = self.query_one("#preview-raw", Static)
         static.update("")
@@ -141,7 +150,8 @@ class PreviewPane(VerticalScroll):
                 return
         markdown = self.query_one("#preview-markdown", Markdown)
         try:
-            await markdown.update(render_native(self._text))
+            self._rendered = self._native_markdown()
+            await markdown.update(self._rendered)
         except Exception:
             self.raw_mode = True
             static.update(render_raw(self._text))
@@ -169,28 +179,44 @@ class PreviewPane(VerticalScroll):
             self._index = Index.build(self._vault_root)
         return self._index
 
-    def resolve_target(self, target: LinkTarget) -> Path | None:
+    def _resolution_context(self) -> tuple[Resolver, "Link | None"] | None:
         """
-        Resolve a decoded ``hoppus://`` link target to a note path.
-
-        Args:
-            target: The decoded navigation payload.
+        Build a ``Resolver`` (notes + attachments) and the current note.
 
         Returns:
-            The resolved path, or None when no vault root is set or the
-            target is missing/ambiguous (spec §6.2).
+            ``(resolver, current_note)``, or None when no vault root is
+            set. ``current_note`` is None when the active note is not in
+            the index (e.g. no note open yet).
         """
         index = self._ensure_index()
         if index is None:
             return None
-        resolver = Resolver(list(index.notes_by_path.values()), index.vault_root)
+        resolver = index._make_resolver()
         current = (
             index.notes_by_path.get(self.note_path)
             if self.note_path is not None
             else None
         )
+        return resolver, current
+
+    def resolve_target(self, target: LinkTarget) -> Path | None:
+        """
+        Resolve a decoded ``hoppus://`` link target to a vault file path.
+
+        Args:
+            target: The decoded navigation payload.
+
+        Returns:
+            The resolved path (a note or an attachment), or None when no
+            vault root is set or the target is missing/ambiguous
+            (spec §6.2).
+        """
+        context = self._resolution_context()
+        if context is None:
+            return None
+        resolver, current = context
         link = Link(
-            source=self.note_path or index.vault_root,
+            source=self.note_path or self._vault_root or Path("."),
             target=target.target,
             anchor=target.anchor,
             display=target.display,
@@ -198,18 +224,125 @@ class PreviewPane(VerticalScroll):
         )
         return resolver.resolve(link, current)
 
+    def _native_markdown(self) -> str:
+        """
+        Produce the navigable Markdown for the native preview (spec §9.5).
+
+        Embeds are pre-expanded into transcluded content one level deep,
+        then OFM links are transformed with an ``is_resolved`` predicate
+        so unresolved wikilinks carry a subtle marker. The plain
+        ``render_native`` transform is computed first as the guaranteed
+        baseline: when there is no vault root to resolve against, or any
+        step of the enhanced pipeline fails, the note still renders.
+
+        Returns:
+            Markdown ready for the ``Markdown`` widget.
+        """
+        base = render_native(self._text)
+        try:
+            context = self._resolution_context()
+            if context is None:
+                return base
+            resolver, current = context
+            expanded = expand_embeds(
+                self._text,
+                resolve=self.resolve_target,
+                read_text=lambda path: path.read_text(encoding="utf-8"),
+                depth=1,
+            )
+
+            def link_resolved(link: Link) -> bool:
+                return resolver.resolve(link, current) is not None
+
+            return transform_ofm(expanded, is_resolved=link_resolved)
+        except Exception:
+            return base
+
     async def open_target(self, target: LinkTarget) -> bool:
         """
-        Navigate to a clicked link target if it resolves to a note.
+        Navigate to a clicked link target, honoring anchors and embeds.
+
+        Same-note anchors (``[[#Heading]]`` / ``[[#^id]]``) scroll the
+        current note without reloading it. Note targets load the note,
+        then scroll to any heading/block anchor. Attachment targets are
+        acknowledged with a notification (open-in-system-app is a later
+        story). Unresolved targets return False so the app can notify.
 
         Args:
             target: The decoded navigation payload.
 
         Returns:
-            True when the target resolved and its note was loaded.
+            True when the click was handled.
         """
+        if not target.target:
+            if target.anchor is None or self.note_path is None:
+                return False
+            self._scroll_to_anchor(target.anchor)
+            return True
         resolved = self.resolve_target(target)
-        if resolved is None or resolved.suffix.lower() != ".md":
+        if resolved is None:
             return False
+        if resolved.suffix.lower() != ".md":
+            self.notify(
+                f"Attachment: {resolved.name} (open in system app comes later)",
+                severity="information",
+                timeout=3,
+            )
+            return True
         await self.set_note(resolved)
+        if target.anchor is not None:
+            self._scroll_to_anchor(target.anchor)
         return True
+
+    def _scroll_to_anchor(self, anchor: str) -> None:
+        """
+        Best-effort scroll of the rendered view to a heading or block
+        anchor, shared by the same-note and cross-note navigation paths.
+
+        Heading anchors go through ``Markdown.goto_anchor`` (nested
+        ``H1#H2`` anchors use the slug of the last segment). Block
+        anchors (``^id``) are mapped to their source line and the
+        covering ``MarkdownBlock`` is scrolled into view. When the
+        anchor can't be located, scroll to the top and notify gently —
+        never crash (spec §7.4 soft handling).
+
+        Args:
+            anchor: Heading text, nested ``H1#H2`` path, or ``^block-id``.
+        """
+        markdown = self.query_one("#preview-markdown", Markdown)
+        if anchor.startswith("^"):
+            source = (
+                self._rendered
+                if self._rendered is not None
+                else render_native(self._text)
+            )
+            line = block_line(source, anchor[1:])
+            block = self._block_at_line(markdown, line) if line is not None else None
+            if block is not None:
+                block.scroll_visible(top=True)
+                return
+        elif markdown.goto_anchor(slug(anchor.split("#")[-1].strip())):
+            return
+        self.scroll_home(animate=False)
+        self.notify(f"Anchor not found: #{anchor}", severity="information", timeout=3)
+
+    @staticmethod
+    def _block_at_line(markdown: Markdown, line: int) -> MarkdownBlock | None:
+        """
+        Find the innermost ``MarkdownBlock`` covering a source line.
+
+        Args:
+            markdown: The rendered Markdown widget.
+            line: 0-based line index into the widget's markdown source.
+
+        Returns:
+            The covering block with the smallest source range, or None.
+        """
+        best: MarkdownBlock | None = None
+        best_span: int | None = None
+        for block in markdown.query(MarkdownBlock):
+            start, end = block.source_range
+            span = end - start
+            if start <= line < end and (best_span is None or span <= best_span):
+                best, best_span = block, span
+        return best
