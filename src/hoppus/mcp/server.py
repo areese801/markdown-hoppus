@@ -14,10 +14,12 @@ no tool that can mutate a vault.
 """
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from hoppus import __version__
 from hoppus.config import load_config
 from hoppus.mcp import tools
 
@@ -40,6 +42,42 @@ WRITE_TOOL_NAMES: tuple[str, ...] = (
     "rename_note",
     "delete_note",
 )
+
+
+def _tool_error(reason: str, error: Exception) -> dict[str, Any]:
+    """
+    Build the structured error dict shared with the write tools.
+
+    :param reason: A stable machine-readable code (e.g.
+        ``"vault_not_found"``, ``"note_not_found"``,
+        ``"internal_error"``).
+    :param error: The failure to report.
+    :returns: ``{"status": "error", "reason": reason, "message": ...}``.
+    """
+    return {"status": "error", "reason": reason, "message": str(error)}
+
+
+def _guarded(call: Callable[[], Any]) -> Any:
+    """
+    Run a tool body, converting failures into structured error dicts.
+
+    Expected lookup failures map to the same stable reasons the write
+    tools use; any other index/IO/parse failure becomes
+    ``reason="internal_error"`` so MCP clients always receive the
+    machine-readable ``{"status": "error", ...}`` shape instead of a
+    raw exception string (HOPPUS-72 F12).
+
+    :param call: The zero-argument tool body to run.
+    :returns: The tool's result, or a structured error dict.
+    """
+    try:
+        return call()
+    except tools.VaultNotFound as error:
+        return _tool_error("vault_not_found", error)
+    except tools.NoteNotFound as error:
+        return _tool_error("note_not_found", error)
+    except Exception as error:
+        return _tool_error("internal_error", error)
 
 
 def write_tools_enabled(config: dict[str, Any]) -> bool:
@@ -81,26 +119,32 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
     """
     cfg = config if config is not None else load_config()
     server = FastMCP("hoppus")
+    # FastMCP's constructor exposes no version parameter, so set it on
+    # the underlying lowlevel server; otherwise `initialize` reports the
+    # mcp SDK's version instead of the app's (HOPPUS-72 F11).
+    server._mcp_server.version = __version__
 
     @server.tool()
-    def list_vaults() -> list[dict[str, Any]]:
+    def list_vaults() -> list[dict[str, Any]] | dict[str, Any]:
         """
         List the vaults under the configured Vaults Root, with note counts.
         """
-        return tools.list_vaults(cfg)
+        return _guarded(lambda: tools.list_vaults(cfg))
 
     @server.tool()
     def list_notes(
         vault: str | None = None,
         folder: str | None = None,
         tag: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """
         List a vault's notes (title, vault-relative path, word count),
         optionally filtered by a folder prefix and/or a tag (nested tags
         match by prefix, case-insensitively).
         """
-        return tools.list_notes(cfg, vault=vault, folder=folder, tag=tag)
+        return _guarded(
+            lambda: tools.list_notes(cfg, vault=vault, folder=folder, tag=tag)
+        )
 
     @server.tool()
     def get_note(note: str, vault: str | None = None) -> dict[str, Any]:
@@ -109,24 +153,26 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         tags, headings, block ids, frontmatter, word count). The note may
         be referenced by vault-relative path or by title/alias.
         """
-        return tools.get_note(cfg, note, vault=vault)
+        return _guarded(lambda: tools.get_note(cfg, note, vault=vault))
 
     @server.tool()
     def search_notes(
         query: str, vault: str | None = None, limit: int = 50
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """
         Search notes with fuzzy full-text terms and targeted operators:
         ``tag:``, ``title:``, ``path:``, and frontmatter ``key:value``.
         """
-        return tools.search_notes(cfg, query, vault=vault, limit=limit)
+        return _guarded(
+            lambda: tools.search_notes(cfg, query, vault=vault, limit=limit)
+        )
 
     @server.tool()
-    def list_tags(vault: str | None = None) -> list[dict[str, Any]]:
+    def list_tags(vault: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
         """
         List every tag in a vault with the number of notes carrying it.
         """
-        return tools.list_tags(cfg, vault=vault)
+        return _guarded(lambda: tools.list_tags(cfg, vault=vault))
 
     @server.tool()
     def get_backlinks(note: str, vault: str | None = None) -> dict[str, Any]:
@@ -135,7 +181,7 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         it) and ``unlinked`` (plain-text title/alias mentions without a
         link).
         """
-        return tools.get_backlinks(cfg, note, vault=vault)
+        return _guarded(lambda: tools.get_backlinks(cfg, note, vault=vault))
 
     @server.tool()
     def get_links(note: str, vault: str | None = None) -> dict[str, Any]:
@@ -143,7 +189,7 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         Return a note's outbound links, split into ``resolved`` (with the
         target's title and path) and ``unresolved`` (dangling targets).
         """
-        return tools.get_links(cfg, note, vault=vault)
+        return _guarded(lambda: tools.get_links(cfg, note, vault=vault))
 
     @server.tool()
     def neighbors(
@@ -153,7 +199,9 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         Return the N-degree local link subgraph around a note: nodes with
         hop distance and edges with link direction.
         """
-        return tools.neighbors(cfg, note, vault=vault, degrees=degrees)
+        return _guarded(
+            lambda: tools.neighbors(cfg, note, vault=vault, degrees=degrees)
+        )
 
     @server.tool()
     def audit_vault(vault: str | None = None) -> dict[str, Any]:
@@ -161,7 +209,7 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         Audit a vault for unresolved wikilinks, broken anchors, missing
         attachments, and broken markdown links, with per-kind counts.
         """
-        return tools.audit_vault(cfg, vault=vault)
+        return _guarded(lambda: tools.audit_vault(cfg, vault=vault))
 
     if write_tools_enabled(cfg):
         _register_write_tools(server, cfg)
@@ -196,8 +244,10 @@ def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
         the vault root, then writes. Collisions and invalid names return
         ``status="error"``.
         """
-        return tools.create_note(
-            cfg, name, content, vault=vault, on_unresolved=on_unresolved
+        return _guarded(
+            lambda: tools.create_note(
+                cfg, name, content, vault=vault, on_unresolved=on_unresolved
+            )
         )
 
     @server.tool()
@@ -215,8 +265,10 @@ def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
         returns the dangling targets plus suggestions; ``"create"``
         bootstraps the missing targets at the vault root, then writes.
         """
-        return tools.update_note(
-            cfg, note, content, vault=vault, on_unresolved=on_unresolved
+        return _guarded(
+            lambda: tools.update_note(
+                cfg, note, content, vault=vault, on_unresolved=on_unresolved
+            )
         )
 
     @server.tool()
@@ -236,13 +288,15 @@ def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
         ``"create"`` bootstraps the missing targets at the vault root,
         then appends.
         """
-        return tools.append_to_note(
-            cfg,
-            note,
-            text,
-            vault=vault,
-            on_unresolved=on_unresolved,
-            heading=heading,
+        return _guarded(
+            lambda: tools.append_to_note(
+                cfg,
+                note,
+                text,
+                vault=vault,
+                on_unresolved=on_unresolved,
+                heading=heading,
+            )
         )
 
     @server.tool()
@@ -255,7 +309,7 @@ def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
         the number of links updated; collisions and invalid names
         return ``status="error"``.
         """
-        return tools.rename_note(cfg, note, new_name, vault=vault)
+        return _guarded(lambda: tools.rename_note(cfg, note, new_name, vault=vault))
 
     @server.tool()
     def delete_note(note: str, vault: str | None = None) -> dict[str, Any]:
@@ -264,7 +318,7 @@ def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
         ``.hoppus``/``.obsidian`` state directories are never touched —
         such attempts return ``status="error"``.
         """
-        return tools.delete_note(cfg, note, vault=vault)
+        return _guarded(lambda: tools.delete_note(cfg, note, vault=vault))
 
 
 def run(config: dict[str, Any] | None = None) -> None:

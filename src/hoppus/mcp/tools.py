@@ -94,7 +94,7 @@ def _resolve_vault(config: dict[str, Any], vault_name: str | None = None) -> Pat
     )
 
 
-def _resolve_note(index: Index, note_ref: str) -> Path:
+def resolve_note(index: Index, note_ref: str) -> Path:
     """
     Resolve a note reference to an absolute note path in the index.
 
@@ -254,7 +254,7 @@ def get_note(
     """
     vault_root = _resolve_vault(config, vault)
     index = Index.build(vault_root)
-    path = _resolve_note(index, note)
+    path = resolve_note(index, note)
     parsed = index.notes_by_path[path]
     return {
         "title": parsed.title,
@@ -346,7 +346,7 @@ def get_backlinks(
     """
     vault_root = _resolve_vault(config, vault)
     index = Index.build(vault_root)
-    path = _resolve_note(index, note)
+    path = resolve_note(index, note)
     linked = [
         _note_ref_dict(index, source)
         for source in sorted(index.backlinks.get(path, set()))
@@ -391,7 +391,7 @@ def get_links(
     """
     vault_root = _resolve_vault(config, vault)
     index = Index.build(vault_root)
-    path = _resolve_note(index, note)
+    path = resolve_note(index, note)
     resolved: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     for link in index.links.get(path, []):
@@ -442,7 +442,7 @@ def neighbors(
     """
     vault_root = _resolve_vault(config, vault)
     index = Index.build(vault_root)
-    path = _resolve_note(index, note)
+    path = resolve_note(index, note)
     graph_config = config.get("graph", {})
     graph = build_local_graph(
         index,
@@ -687,7 +687,7 @@ def update_note(
     try:
         vault_root = _resolve_vault(config, vault)
         index = Index.build(vault_root)
-        path = _resolve_note(index, note)
+        path = resolve_note(index, note)
     except VaultNotFound as error:
         return _error("vault_not_found", str(error))
     except NoteNotFound as error:
@@ -783,7 +783,7 @@ def append_to_note(
     try:
         vault_root = _resolve_vault(config, vault)
         index = Index.build(vault_root)
-        path = _resolve_note(index, note)
+        path = resolve_note(index, note)
     except VaultNotFound as error:
         return _error("vault_not_found", str(error))
     except NoteNotFound as error:
@@ -832,7 +832,7 @@ def rename_note(
     try:
         vault_root = _resolve_vault(config, vault)
         index = Index.build(vault_root)
-        path = _resolve_note(index, note)
+        path = resolve_note(index, note)
     except VaultNotFound as error:
         return _error("vault_not_found", str(error))
     except NoteNotFound as error:
@@ -879,7 +879,7 @@ def delete_note(
     except VaultNotFound as error:
         return _error("vault_not_found", str(error))
     try:
-        path = _resolve_note(index, note)
+        path = resolve_note(index, note)
     except NoteNotFound as error:
         ref = note.strip().strip("/")
         candidate = vault_root / ref

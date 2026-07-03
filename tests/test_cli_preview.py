@@ -20,6 +20,10 @@ def note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     Create a sample note and pin the CLI config to the builtin renderer.
 
+    Also builds a vaults root with a ``Main`` vault (containing
+    ``Real Note.md``) and an ``Other`` vault (containing ``Alt.md``) so
+    the HOPPUS-72 note-name resolution path is exercisable.
+
     Args:
         tmp_path: pytest's per-test temp directory.
         monkeypatch: pytest's monkeypatching fixture.
@@ -30,11 +34,23 @@ def note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "note.md"
     path.write_text("# Hello\n\n```python\nprint(1)\n```\n", encoding="utf-8")
 
+    vaults_root = tmp_path / "vaults"
+    main = vaults_root / "Main"
+    main.mkdir(parents=True)
+    (main / "Real Note.md").write_text("# From The Vault\n", encoding="utf-8")
+    other = vaults_root / "Other"
+    other.mkdir()
+    (other / "Alt.md").write_text("# Other Vault Note\n", encoding="utf-8")
+
     def fake_load_config(vault: Path | None = None) -> dict[str, Any]:
         """
         Return a minimal config selecting the builtin renderer.
         """
-        return {"preview": {"browser_renderer": "builtin"}}
+        return {
+            "preview": {"browser_renderer": "builtin"},
+            "vaults_root": str(vaults_root),
+            "default_vault": "Main",
+        }
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     return path
@@ -113,6 +129,72 @@ def test_preview_go_grip_path_is_guarded(
     assert result.exit_code == 0
     assert launched == [note]
     assert "go-grip" in result.output
+
+
+def test_preview_resolves_note_name_in_default_vault(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A PATH that is not a file is resolved as a note name within the
+    default vault, matching ``audit``/MCP semantics (HOPPUS-72 F9).
+    """
+    opened: list[Path] = []
+
+    def fake_open(html_path: Path) -> str:
+        """
+        Record the rendered path instead of launching a browser.
+        """
+        opened.append(html_path)
+        return html_path.resolve().as_uri()
+
+    monkeypatch.setattr(cli, "open_in_browser", fake_open)
+    result = runner.invoke(cli.app, ["preview", "Real Note", "--browser"])
+    assert result.exit_code == 0
+    assert len(opened) == 1
+    content = opened[0].read_text(encoding="utf-8")
+    assert "<h1>From The Vault</h1>" in content
+
+
+def test_preview_vault_option_selects_the_vault(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ``--vault`` resolves the note name in the named vault instead of
+    the default one (HOPPUS-72 F9).
+    """
+    opened: list[Path] = []
+    monkeypatch.setattr(cli, "open_in_browser", opened.append)
+    result = runner.invoke(cli.app, ["preview", "Alt", "--vault", "Other", "--browser"])
+    assert result.exit_code == 0
+    assert "<h1>Other Vault Note</h1>" in opened[0].read_text(encoding="utf-8")
+
+
+def test_preview_explicit_path_wins_over_note_lookup(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A PATH that exists as a file is used directly — no vault lookup
+    (HOPPUS-72 F9 resolution order).
+    """
+    opened: list[Path] = []
+    monkeypatch.setattr(cli, "open_in_browser", opened.append)
+    result = runner.invoke(cli.app, ["preview", str(note), "--browser"])
+    assert result.exit_code == 0
+    assert "<h1>Hello</h1>" in opened[0].read_text(encoding="utf-8")
+
+
+def test_preview_unknown_note_name_exits_nonzero(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A reference that is neither a file nor a resolvable note name exits
+    1 without opening anything (HOPPUS-72 F9).
+    """
+    opened: list[Path] = []
+    monkeypatch.setattr(cli, "open_in_browser", opened.append)
+    result = runner.invoke(cli.app, ["preview", "No Such Note", "--browser"])
+    assert result.exit_code == 1
+    assert opened == []
 
 
 def test_preview_without_browser_stays_stubbed(note: Path) -> None:

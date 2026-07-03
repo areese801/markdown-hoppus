@@ -8,6 +8,9 @@ transport is ever started and ``run()`` is never called.
 import asyncio
 from typing import Any
 
+import pytest
+
+from hoppus import __version__
 from hoppus.config import default_config
 from hoppus.mcp.server import build_server
 
@@ -65,3 +68,54 @@ def test_build_server_without_config_loads_defaults() -> None:
     """
     server = build_server()
     assert server.name == "hoppus"
+
+
+def test_initialize_reports_app_version() -> None:
+    """
+    The server advertises the hoppus version, not the mcp SDK's
+    (HOPPUS-72 F11).
+    """
+    server = build_server(_config())
+    options = server._mcp_server.create_initialization_options()
+    assert options.server_version == __version__
+
+
+def test_tool_index_failure_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An unexpected index/IO failure inside a tool comes back as the
+    structured ``{"status": "error", ...}`` dict the write tools use,
+    not a raw exception (HOPPUS-72 F12).
+    """
+
+    def boom(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise OSError("disk exploded")
+
+    monkeypatch.setattr("hoppus.mcp.tools.list_notes", boom)
+    server = build_server(_config())
+    _content, structured = asyncio.run(server.call_tool("list_notes", {}))
+    assert structured["result"] == {
+        "status": "error",
+        "reason": "internal_error",
+        "message": "disk exploded",
+    }
+
+
+def test_tool_vault_lookup_failure_maps_to_stable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A ``VaultNotFound`` raised by a read tool maps to the same stable
+    ``vault_not_found`` reason the write tools return (HOPPUS-72 F12).
+    """
+    config = _config()
+    config["vaults_root"] = "/no/such/vaults/root"
+    server = build_server(config)
+    _content, structured = asyncio.run(
+        server.call_tool("list_tags", {"vault": "Missing"})
+    )
+    result = structured["result"]
+    assert result["status"] == "error"
+    assert result["reason"] == "vault_not_found"
+    assert result["message"]

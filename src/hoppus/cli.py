@@ -20,6 +20,7 @@ tree.
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -32,6 +33,7 @@ from hoppus.find import run_find
 from hoppus.index.indexer import Index
 from hoppus.integrity import KIND_INVALID_FRONTMATTER, AuditIssue, audit_vault
 from hoppus.mcp import server as mcp_server
+from hoppus.mcp.tools import NoteNotFound, resolve_note
 from hoppus.render.browser import (
     go_grip_available,
     launch_go_grip,
@@ -275,21 +277,75 @@ def capture(
     typer.echo(str(path))
 
 
+def _resolve_preview_note(
+    config: dict[str, Any], note_ref: str, vault: str | None
+) -> Path:
+    """
+    Resolve a preview NOTE reference as a note name within a vault.
+
+    Mirrors the ``audit``/MCP note semantics: the reference may be a
+    vault-relative path or a note title/alias.
+
+    Args:
+        config: The merged configuration mapping (spec §12).
+        note_ref: The note reference to resolve.
+        vault: Vault name; defaults to the configured default vault.
+
+    Returns:
+        The absolute path of the matching note.
+
+    Raises:
+        typer.Exit: With code 1 if the vault or the note cannot be
+            resolved.
+    """
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = vault or config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    index = Index.build(selected.path)
+    try:
+        return resolve_note(index, note_ref)
+    except NoteNotFound as error:
+        typer.secho(str(error), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from error
+
+
 @app.command()
 def preview(
-    path: str = typer.Argument(None, help="Path of the note to render."),
+    path: str = typer.Argument(
+        None, help="Note name, or filesystem path, of the note to render."
+    ),
+    vault: str = typer.Option(
+        None,
+        "--vault",
+        help=(
+            "Vault to resolve note names in (default: the configured default vault)."
+        ),
+    ),
     browser: bool = typer.Option(
         False, "--browser", help="Render to the local browser instead."
     ),
 ) -> None:
     """
     Render a note to the terminal or the local browser (spec §10, §9.5,
-    HOPPUS-56).
+    HOPPUS-56, HOPPUS-72).
 
-    With ``--browser``, renders PATH locally (markdown-it-py + Pygments,
-    GitHub-like CSS) to a temp HTML file and opens it in the browser via
-    a ``file://`` URL — no content ever leaves the machine. PATH is
-    resolved as given (absolute or relative to the current directory).
+    PATH resolution order: if PATH exists as a file (absolute,
+    ``~``-expanded, or relative to the current directory) it is used
+    directly; otherwise it is resolved as a note name (vault-relative
+    path or title/alias) within the selected vault (``--vault`` or the
+    configured default), matching ``audit``/MCP semantics.
+
+    With ``--browser``, renders the note locally (markdown-it-py +
+    Pygments, GitHub-like CSS) to a temp HTML file and opens it in the
+    browser via a ``file://`` URL — no content ever leaves the machine.
     If ``preview.browser_renderer`` is ``go-grip`` and the binary is on
     the PATH, rendering is delegated to it instead; the Python ``grip``
     package is never used. The terminal preview (without ``--browser``)
@@ -300,12 +356,11 @@ def preview(
     if path is None:
         typer.secho("preview --browser requires a PATH", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    config = load_config()
     note = Path(path).expanduser()
     if not note.is_file():
-        typer.secho(f"No such note: {note}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        note = _resolve_preview_note(config, path, vault)
 
-    config = load_config()
     renderer = config.get("preview", {}).get("browser_renderer", "builtin")
     if renderer == "go-grip" and go_grip_available():
         launch_go_grip(note)

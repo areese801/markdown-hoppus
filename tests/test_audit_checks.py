@@ -161,9 +161,7 @@ def test_unresolved_wikilink_kind_and_toggle(tmp_path: Path) -> None:
     are gated by ``enforce_no_dangling_wikilinks``.
     """
     text = "See [[Ghost]].\n"
-    assert audit_targets(tmp_path / "on", text) == [
-        (KIND_UNRESOLVED_WIKILINK, "Ghost")
-    ]
+    assert audit_targets(tmp_path / "on", text) == [(KIND_UNRESOLVED_WIKILINK, "Ghost")]
     config = config_with(enforce_no_dangling_wikilinks=False)
     assert audit_targets(tmp_path / "off", text, config) == []
 
