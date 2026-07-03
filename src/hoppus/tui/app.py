@@ -31,6 +31,7 @@ from textual.widgets import (
 
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
+from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
@@ -92,6 +93,13 @@ class HoppusApp(App[None]):
     BINDINGS = [  # type: ignore[assignment]
         *default_bindings(),
         Binding("m", "toggle_raw", "Raw view", show=False, id="toggle_raw"),
+        Binding(
+            "u",
+            "unlinked_mentions",
+            "Unlinked mentions",
+            show=False,
+            id="unlinked_mentions",
+        ),
     ]
 
     CSS = """
@@ -288,6 +296,44 @@ class HoppusApp(App[None]):
             self._index = Index.build(vault_root)
             self._index_root = vault_root
         return self._index
+
+    def action_unlinked_mentions(self) -> None:
+        """
+        Compute and show unlinked mentions for the active note (HOPPUS-33).
+
+        On-demand only (spec §8): searches the vault for plain-text
+        occurrences of the active note's title/aliases and appends the
+        results to the backlinks pane. Converting a mention into a real
+        link arrives with the editing stories, so for now this is
+        display + navigation only.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        vault_root = self.preview.vault_root
+        if vault_root is None or not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        index = self._active_index(vault_root)
+        note = index.notes_by_path.get(Path(note_path))
+        if note is None:
+            self.notify(
+                "Active note is not in the index", severity="warning", timeout=3
+            )
+            return
+        mentions = find_unlinked_mentions(
+            note, index, read_text=lambda path: path.read_text(encoding="utf-8")
+        )
+        self.query_one("#backlinks-pane", BacklinksPane).show_unlinked_mentions(
+            mentions, vault_root
+        )
+        if mentions:
+            self.notify(
+                "Convert-to-link arrives with editing (a later story)",
+                severity="information",
+                timeout=3,
+            )
 
     async def action_toggle_raw(self) -> None:
         """

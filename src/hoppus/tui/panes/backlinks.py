@@ -1,11 +1,13 @@
 """
-Backlinks pane: linked mentions for the active note (spec §9.1, HOPPUS-32).
+Backlinks pane: linked and unlinked mentions for the active note
+(spec §9.1, HOPPUS-32, HOPPUS-33).
 
 An ``OptionList`` in the right sidebar listing the notes that link TO the
 active note, populated from the index's ``backlinks`` map and sorted
-case-insensitively by source title. Selecting an entry navigates to that
-source note through the app's ``open_note`` funnel. Unlinked mentions are
-a later story (HOPPUS-33) and will share this sidebar.
+case-insensitively by source title. On demand, an "Unlinked mentions"
+section is appended below the backlinks (see
+``hoppus.index.mentions``). Selecting an entry in either section
+navigates to that source note through the app's ``open_note`` funnel.
 """
 
 from pathlib import Path
@@ -14,8 +16,11 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from hoppus.index.indexer import Index
+from hoppus.index.mentions import UnlinkedMention
 
 _EMPTY_LABEL = "No backlinks"
+_UNLINKED_HEADER = "── Unlinked mentions ──"
+_NO_UNLINKED_LABEL = "No unlinked mentions"
 
 
 class BacklinksPane(OptionList):
@@ -33,6 +38,9 @@ class BacklinksPane(OptionList):
         # Option id → source note path; titles can collide across folders,
         # so selection maps back through ids, never the visible title.
         self._paths: dict[str, Path] = {}
+        # Option ids of the appended unlinked-mentions section (HOPPUS-33),
+        # so re-running the action replaces the section instead of stacking.
+        self._unlinked_ids: list[str] = []
 
     def on_mount(self) -> None:
         """
@@ -56,6 +64,7 @@ class BacklinksPane(OptionList):
         """
         self._vault_root = Path(vault_root)
         self._paths = {}
+        self._unlinked_ids = []
         self.clear_options()
         entries: list[tuple[str, Path]] = []
         for source in index.backlinks.get(Path(note_path), set()):
@@ -71,12 +80,55 @@ class BacklinksPane(OptionList):
             self._paths[option_id] = source
             self.add_option(Option(title, id=option_id))
 
+    def show_unlinked_mentions(
+        self, mentions: list[UnlinkedMention], vault_root: Path
+    ) -> None:
+        """
+        Append an "Unlinked mentions" section below the linked backlinks.
+
+        The existing backlink rows are left untouched; a previously shown
+        unlinked section is replaced. Each mention row shows the source
+        title and its occurrence count, and maps to the source path in
+        ``_paths`` so the shared selection handler navigates to it. With
+        no mentions, a single disabled placeholder row is shown instead.
+
+        Args:
+            mentions: Unlinked mentions for the active note.
+            vault_root: Vault root, stored for later navigation.
+        """
+        self._vault_root = Path(vault_root)
+        for option_id in self._unlinked_ids:
+            self.remove_option(option_id)
+            self._paths.pop(option_id, None)
+        self._unlinked_ids = []
+
+        header_id = "unlinked-header"
+        self.add_option(
+            Option(f"[dim]{_UNLINKED_HEADER}[/dim]", id=header_id, disabled=True)
+        )
+        self._unlinked_ids.append(header_id)
+        if not mentions:
+            empty_id = "unlinked-empty"
+            self.add_option(
+                Option(f"[dim]{_NO_UNLINKED_LABEL}[/dim]", id=empty_id, disabled=True)
+            )
+            self._unlinked_ids.append(empty_id)
+            return
+        for position, mention in enumerate(mentions):
+            option_id = f"unlinked-{position}"
+            self._paths[option_id] = mention.source
+            self._unlinked_ids.append(option_id)
+            self.add_option(
+                Option(f"{mention.title}  ·  ×{mention.count}", id=option_id)
+            )
+
     def clear(self) -> None:
         """
         Reset to the empty state (vault switch / no active note).
         """
         self._vault_root = None
         self._paths = {}
+        self._unlinked_ids = []
         self.clear_options()
         self._show_empty()
 
