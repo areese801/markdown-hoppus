@@ -87,14 +87,26 @@ def _discover_or_exit(vaults_root: Path) -> list[Vault]:
         raise typer.Exit(code=1) from error
 
 
+STUB_EXIT_CODE = 3
+"""Exit code shared by every not-yet-implemented stub subcommand."""
+
+
 def _stub(feature: str) -> None:
     """
-    Print the standard placeholder notice for an unimplemented subcommand.
+    Report an unimplemented subcommand and exit non-zero.
+
+    Prints the placeholder notice to STDERR and exits with
+    :data:`STUB_EXIT_CODE` so scripts and CI can detect the no-op
+    instead of mistaking it for success.
 
     Args:
         feature: Human-readable name of the feature being stubbed.
+
+    Raises:
+        typer.Exit: Always, with code :data:`STUB_EXIT_CODE`.
     """
-    typer.echo(f"{feature}: {NOT_IMPLEMENTED_SUFFIX}")
+    typer.secho(f"{feature}: {NOT_IMPLEMENTED_SUFFIX}", err=True)
+    raise typer.Exit(code=STUB_EXIT_CODE)
 
 
 def _launch_tui(vault: str | None = None) -> None:
@@ -285,7 +297,6 @@ def preview(
     """
     if not browser:
         _stub("preview")
-        return
     if path is None:
         typer.secho("preview --browser requires a PATH", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -396,6 +407,9 @@ def audit(
     links, each gated by its ``link_integrity`` toggle (§7.6).
 
     Report-only — never prompts or mutates.
+
+    Exit codes: 0 when the vault is clean, 1 when one or more problems
+    are reported (so CI can gate on link hygiene).
     """
     config = load_config()
     vaults_root = Path(config["vaults_root"]).expanduser()
@@ -423,6 +437,7 @@ def audit(
         relative = note_path.relative_to(selected.path)
         for issue in issues:
             typer.echo(f"  {relative}: {_format_issue(issue)}")
+    raise typer.Exit(code=1)
 
 
 @app.command()

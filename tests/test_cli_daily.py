@@ -64,6 +64,8 @@ def test_daily_creates_and_prints_path(vaults_root: Path) -> None:
     notes = list(daily_dir.glob("*.md"))
     assert len(notes) == 1
     assert str(notes[0]) in result.output
+    content = notes[0].read_text(encoding="utf-8")
+    assert content == f"# {notes[0].stem}\n"
 
 
 def test_daily_is_idempotent(vaults_root: Path) -> None:

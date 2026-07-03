@@ -15,7 +15,8 @@ Rules:
   command always lands on the same file.
 - **Seeding**: a new note is seeded from the configured template when
   that template file exists (``{{title}}`` renders as the date string);
-  a missing template silently yields an empty note — never an error.
+  a missing template silently falls back to a minimal title heading
+  (``# <date>``) — never an error, never a 0-byte file.
 
 Determinism: every function takes an explicit ``now``
 :class:`~datetime.datetime` — the caller supplies the clock (the
@@ -70,7 +71,8 @@ def open_or_create_daily(
     created if needed and the note is seeded from
     ``daily_notes.template`` when that vault-relative template file
     exists (``{{title}}`` renders as the formatted date string); a
-    missing template yields an empty note rather than an error.
+    missing template falls back to a ``# <date>`` title heading rather
+    than an error or an empty file.
 
     Registers nothing with the index — the caller reindexes.
 
@@ -85,7 +87,7 @@ def open_or_create_daily(
     if path.exists():
         return path, False
     template_path = vault_root / _daily_config(config)["template"]
-    content = ""
+    content = f"# {path.stem}\n"
     if template_path.is_file():
         content = render_template(
             template_path, now=now, title=path.stem, config=config

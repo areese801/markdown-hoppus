@@ -74,16 +74,17 @@ def test_open_or_create_seeds_from_template(
     assert path.read_text(encoding="utf-8") == "# 2026-07-03\n"
 
 
-def test_open_or_create_without_template_creates_empty_note(
+def test_open_or_create_without_template_seeds_title_heading(
     tmp_path: Path, config: dict[str, Any]
 ) -> None:
     """
-    A missing template yields an empty note — never an error.
+    A missing template falls back to a ``# <date>`` title heading —
+    never an error, never a 0-byte file (HOPPUS-71 F7).
     """
     path, created = open_or_create_daily(tmp_path, config, now=FIXED_NOW)
 
     assert created is True
-    assert path.read_text(encoding="utf-8") == ""
+    assert path.read_text(encoding="utf-8") == "# 2026-07-03\n"
 
 
 def test_open_or_create_is_idempotent(tmp_path: Path, config: dict[str, Any]) -> None:

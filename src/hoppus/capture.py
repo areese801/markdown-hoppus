@@ -78,6 +78,10 @@ def capture_note(
     :param vault_root: The vault root directory.
     :param config: The loaded hoppus config (``inbox.folder`` is read,
         defaulting to ``"."``).
+    The written file always ends with a trailing newline (POSIX text
+    convention); one is appended when ``text`` lacks it, and an empty
+    body yields a single newline.
+
     :param text: The note body (may be empty).
     :param title: Optional explicit title; omitted/empty means a
         timestamped stem.
@@ -98,5 +102,6 @@ def capture_note(
     path = inbox_dir / f"{stem}.md"
     if path.exists():
         raise FileExistsError(f"Note already exists: {path}")
-    path.write_text(text, encoding="utf-8")
+    body = text if text.endswith("\n") else f"{text}\n"
+    path.write_text(body, encoding="utf-8")
     return path

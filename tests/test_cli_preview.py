@@ -117,8 +117,9 @@ def test_preview_go_grip_path_is_guarded(
 
 def test_preview_without_browser_stays_stubbed(note: Path) -> None:
     """
-    Terminal preview (no ``--browser``) still prints the stub notice.
+    Terminal preview (no ``--browser``) prints the stub notice to
+    STDERR and exits with the stub exit code (HOPPUS-71 F6).
     """
     result = runner.invoke(cli.app, ["preview", str(note)])
-    assert result.exit_code == 0
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.output
+    assert result.exit_code == cli.STUB_EXIT_CODE
+    assert cli.NOT_IMPLEMENTED_SUFFIX in result.stderr

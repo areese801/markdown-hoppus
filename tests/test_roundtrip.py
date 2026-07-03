@@ -231,15 +231,16 @@ def test_frontmatter_same_value_update_is_noop() -> None:
     assert result == _ORDERED_NOTE_MD
 
 
-def test_frontmatter_update_normalizes_only_extra_colon_spacing() -> None:
+def test_frontmatter_update_normalizes_only_the_changed_line() -> None:
     """
-    Document the one observed benign ruamel normalization.
+    Document the one remaining benign normalization (D4).
 
-    ruamel.yaml round-trip mode collapses non-standard runs of spaces
-    after a mapping colon (``weird:   x`` becomes ``weird: x``) when the
-    frontmatter is re-emitted. This test pins that ACTUAL behavior:
-    spacing normalization is confined to the frontmatter block, values
-    and quoting are untouched, and the body stays byte-identical.
+    Only the updated key's own line is re-emitted by ruamel, so its
+    non-standard run of spaces after the colon (``weird:   x``)
+    collapses to a single space. Every OTHER line — including other
+    keys' non-standard spacing, quoting, and flow-sequence whitespace —
+    is spliced back verbatim, and the body stays byte-identical
+    (HOPPUS-71 F5).
     """
     updated = update_frontmatter_key(_WEIRD_NOTE_MD, "weird", "changed")
 
@@ -248,9 +249,52 @@ def test_frontmatter_update_normalizes_only_extra_colon_spacing() -> None:
     assert body == original_body
 
     assert frontmatter["weird"] == "changed"
+    assert "weird: changed\n" in updated
     assert "'single': value\n" in updated
-    assert '"double": also-spaced\n' in updated
-    assert "list: [1, 2, 3]\n" in updated
+    assert '"double":    also-spaced\n' in updated
+    assert "list: [1, 2,   3]\n" in updated
+
+
+# Built by concatenation so the trailing space after ``tags:`` cannot be
+# silently stripped by editors or formatters.
+_BLANK_LINE_NOTE_MD = (
+    "---\n\ntitle: Leading Blank\ntags: \npriority: 1\n---\n\nBody stays put.\n"
+)
+
+
+def test_frontmatter_update_preserves_blank_line_and_trailing_space() -> None:
+    """
+    A genuine value change keeps pathological frontmatter bytes intact
+    (HOPPUS-71 F5).
+
+    Pins the two real-corpus regressions: a blank line INSIDE the
+    frontmatter block (here, before the first key — the case ruamel
+    drops on re-emit) and the trailing space after an empty-valued key
+    (``tags: ``) both survive an update to a DIFFERENT key.
+    """
+    updated = update_frontmatter_key(_BLANK_LINE_NOTE_MD, "priority", 2)
+
+    assert updated == _BLANK_LINE_NOTE_MD.replace("priority: 1", "priority: 2")
+    assert "---\n\ntitle: Leading Blank\n" in updated
+    assert "tags: \n" in updated
+
+
+def test_frontmatter_same_value_update_is_noop_on_pathological_notes() -> None:
+    """
+    Re-setting a key to its current value is byte-identical even for
+    frontmatter ruamel cannot round-trip (HOPPUS-71 F5).
+
+    Mirrors the real-corpus sweep (same key, same value) that
+    previously dropped a blank line inside one note's frontmatter and
+    collapsed ``tags: `` to ``tags:`` in 14 others.
+    """
+    assert (
+        update_frontmatter_key(_BLANK_LINE_NOTE_MD, "title", "Leading Blank")
+        == _BLANK_LINE_NOTE_MD
+    )
+    assert update_frontmatter_key(_BLANK_LINE_NOTE_MD, "tags", None) == (
+        _BLANK_LINE_NOTE_MD
+    )
 
 
 def test_bookmark_write_touches_only_hoppus_dir(tmp_path: Path) -> None:

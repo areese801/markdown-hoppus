@@ -3,8 +3,8 @@ CLI tests for ``hop audit`` (spec §10, §19 D1, HOPPUS-40).
 
 Follows ``tests/test_cli.py``'s hermetic approach: ``hoppus.cli.load_config``
 is monkeypatched at a temp Vaults Root so no real config or ``~/Notes`` is
-ever read. The audit is report-only, so issues never change the exit code —
-only an unknown vault name exits 1.
+ever read. The audit is report-only (never mutates), but its exit code is a
+CI gate (HOPPUS-71 F10): 0 for a clean vault, 1 when problems are reported.
 """
 
 from pathlib import Path
@@ -61,10 +61,11 @@ def vaults_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_audit_lists_unresolved_links_and_counts(vaults_root: Path) -> None:
     """
-    ``audit VAULT`` reports each unresolved link with the counts.
+    ``audit VAULT`` reports each unresolved link with the counts and
+    exits 1 so CI can gate on link hygiene (HOPPUS-71 F10).
     """
     result = runner.invoke(cli.app, ["audit", "Personal"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "Personal: 3 unresolved link(s) across 2 note(s)" in result.output
     assert "Meeting Notes.md: [[Jane Smtih]]" in result.output
     assert "Meeting Notes.md: [[Q3 Planning]]" in result.output
@@ -76,14 +77,15 @@ def test_audit_defaults_to_configured_vault(vaults_root: Path) -> None:
     ``audit`` without an argument audits the configured default vault.
     """
     result = runner.invoke(cli.app, ["audit"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "Personal" in result.output
     assert "[[Nowhere]]" in result.output
 
 
 def test_audit_clean_vault_prints_all_clear(vaults_root: Path) -> None:
     """
-    A vault with no unresolved links prints the all-clear line.
+    A vault with no unresolved links prints the all-clear line and
+    exits 0 (HOPPUS-71 F10).
     """
     result = runner.invoke(cli.app, ["audit", "Work"])
     assert result.exit_code == 0

@@ -57,17 +57,18 @@ def test_capture_creates_note_in_inbox_and_prints_path(vaults_root: Path) -> Non
     assert printed.is_absolute()
     assert printed.parent == vaults_root / "Personal"
     assert printed.suffix == ".md"
-    assert printed.read_text(encoding="utf-8") == "some text"
+    assert printed.read_text(encoding="utf-8") == "some text\n"
 
 
-def test_capture_without_text_creates_empty_note(vaults_root: Path) -> None:
+def test_capture_without_text_creates_newline_only_note(vaults_root: Path) -> None:
     """
-    ``hop capture`` with no TEXT creates an empty timestamped note.
+    ``hop capture`` with no TEXT creates a timestamped note holding
+    just the trailing newline (HOPPUS-71 F8).
     """
     result = runner.invoke(cli.app, ["capture"])
     assert result.exit_code == 0
     printed = Path(result.output.strip())
-    assert printed.read_text(encoding="utf-8") == ""
+    assert printed.read_text(encoding="utf-8") == "\n"
 
 
 def test_capture_unknown_default_vault_exits_nonzero(

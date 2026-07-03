@@ -69,7 +69,7 @@ def test_audit_labels_each_issue_with_its_kind(vaults_root: dict[str, Any]) -> N
     Every issue line shows the written link form and a kind label.
     """
     result = runner.invoke(cli.app, ["audit", "Personal"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "Note.md: [[Nope]] (unresolved wikilink)" in result.output
     assert "Note.md: [[Existing#Bar]] (broken anchor)" in result.output
     assert "Note.md: ![[img.png]] (missing attachment)" in result.output
@@ -85,7 +85,7 @@ def test_audit_honors_config_toggles(vaults_root: dict[str, Any]) -> None:
     vaults_root["link_integrity"]["report_broken_markdown_links"] = False
 
     result = runner.invoke(cli.app, ["audit", "Personal"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "broken anchor" not in result.output
     assert "broken markdown link" not in result.output
     assert "(unresolved wikilink)" in result.output

@@ -64,7 +64,7 @@ def test_capture_note_dot_folder_lands_at_vault_root(vault_root: Path) -> None:
     path = capture_note(vault_root, config, text="hello", now=FIXED_NOW)
     assert path == vault_root / "2026-07-03 143059.md"
     assert path.parent == vault_root
-    assert path.read_text(encoding="utf-8") == "hello"
+    assert path.read_text(encoding="utf-8") == "hello\n"
 
 
 def test_capture_note_custom_inbox_folder_is_created_and_used(
@@ -77,7 +77,7 @@ def test_capture_note_custom_inbox_folder_is_created_and_used(
     assert not (vault_root / "Inbox").exists()
     path = capture_note(vault_root, config, text="idea", now=FIXED_NOW)
     assert path == vault_root / "Inbox" / "2026-07-03 143059.md"
-    assert path.read_text(encoding="utf-8") == "idea"
+    assert path.read_text(encoding="utf-8") == "idea\n"
 
 
 def test_capture_note_missing_inbox_config_defaults_to_root(vault_root: Path) -> None:
@@ -90,12 +90,24 @@ def test_capture_note_missing_inbox_config_defaults_to_root(vault_root: Path) ->
 
 def test_capture_note_title_stem_and_empty_body(vault_root: Path) -> None:
     """
-    A provided title names the note; an omitted body writes empty text.
+    A provided title names the note; an omitted body writes just the
+    trailing newline (HOPPUS-71 F8 — never a 0-byte file).
     """
     config = {"inbox": {"folder": "."}}
     path = capture_note(vault_root, config, title="Groceries", now=FIXED_NOW)
     assert path == vault_root / "Groceries.md"
-    assert path.read_text(encoding="utf-8") == ""
+    assert path.read_text(encoding="utf-8") == "\n"
+
+
+def test_capture_note_appends_trailing_newline(vault_root: Path) -> None:
+    """
+    The written file always ends with exactly the body plus a trailing
+    newline — an already-terminated body is not double-terminated
+    (HOPPUS-71 F8).
+    """
+    config = {"inbox": {"folder": "."}}
+    path = capture_note(vault_root, config, text="done\n", now=FIXED_NOW)
+    assert path.read_text(encoding="utf-8") == "done\n"
 
 
 def test_capture_note_reserved_char_title_raises(vault_root: Path) -> None:
@@ -116,4 +128,4 @@ def test_capture_note_collision_raises_file_exists(vault_root: Path) -> None:
     first = capture_note(vault_root, config, text="first", now=FIXED_NOW)
     with pytest.raises(FileExistsError):
         capture_note(vault_root, config, text="second", now=FIXED_NOW)
-    assert first.read_text(encoding="utf-8") == "first"
+    assert first.read_text(encoding="utf-8") == "first\n"

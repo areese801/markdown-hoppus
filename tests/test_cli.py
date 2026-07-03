@@ -213,13 +213,16 @@ def test_open_unknown_vault_exits_nonzero(
         ["preview"],
     ],
 )
-def test_stubbed_subcommands_exit_zero(args: list[str]) -> None:
+def test_stubbed_subcommands_exit_nonzero_on_stderr(args: list[str]) -> None:
     """
-    Every stubbed subcommand runs, exits 0, and prints its placeholder line.
+    Every stubbed subcommand prints its placeholder line to STDERR and
+    exits with the stub exit code, so scripts and CI can detect the
+    no-op (HOPPUS-71 F6).
     """
     result = runner.invoke(cli.app, args)
-    assert result.exit_code == 0
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.output
+    assert result.exit_code == cli.STUB_EXIT_CODE
+    assert cli.NOT_IMPLEMENTED_SUFFIX in result.stderr
+    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.stdout
 
 
 def test_package_main_delegates_to_cli(monkeypatch: pytest.MonkeyPatch) -> None:
