@@ -156,7 +156,6 @@ def test_open_unknown_vault_exits_nonzero(vaults_root: Path) -> None:
         ["reindex"],
         ["mcp"],
         ["new"],
-        ["capture"],
         ["preview"],
     ],
 )

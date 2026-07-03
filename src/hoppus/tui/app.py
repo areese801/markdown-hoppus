@@ -33,7 +33,16 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import bookmarks, daily, fileops, integrity, related, stats, templates
+from hoppus import (
+    bookmarks,
+    capture,
+    daily,
+    fileops,
+    integrity,
+    related,
+    stats,
+    templates,
+)
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
@@ -993,8 +1002,67 @@ class HoppusApp(App[None]):
         await self.open_note(path, vault_root=vault_root)
 
     def action_quick_capture(self) -> None:
-        """Quick capture (later story)."""
-        self._not_implemented("Quick capture")
+        """
+        Quick capture to the inbox (spec §9.11, HOPPUS-51, key ``c``).
+
+        Runs as a worker so the optional title prompt can be awaited
+        via ``push_screen_wait``; the naming/write logic lives in
+        :mod:`hoppus.capture` and :meth:`_quick_capture_flow`.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        self.run_worker(self._quick_capture_flow(vault_root), exclusive=False)
+
+    async def _prompt_capture_title(self) -> str | None:
+        """
+        Push the (optional) title prompt for a quick capture.
+
+        An empty value is allowed — it means a timestamped filename.
+        Factored out so headless tests can stub the modal and drive
+        :meth:`_quick_capture_flow` with canned titles.
+
+        :returns: The entered title (possibly empty), or None on
+            cancel.
+        """
+        return await self.push_screen_wait(
+            TextPromptModal(
+                "Quick capture — title (empty = timestamp)",
+                placeholder="Optional title",
+            )
+        )
+
+    async def _quick_capture_flow(self, vault_root: Path) -> None:
+        """
+        The quick-capture flow (spec §9.11, HOPPUS-51).
+
+        Prompts for an optional title (empty = timestamped stem),
+        creates the note in the configured inbox folder via
+        :func:`hoppus.capture.capture_note` (the app supplies the real
+        clock), suppresses the self-write, reindexes, and opens the
+        new note in the preview for editing — body text entry happens
+        in the editor, not the prompt. Collisions and invalid names
+        notify instead of crashing.
+
+        :param vault_root: The active vault root.
+        """
+        entered = await self._prompt_capture_title()
+        if entered is None:
+            return
+        title = entered.strip() or None
+        try:
+            path = capture.capture_note(
+                vault_root, self.config, title=title, now=datetime.now()
+            )
+        except (ValueError, FileExistsError, OSError) as error:
+            self.notify(f"Quick capture: {error}", severity="error", timeout=5)
+            return
+        self._suppress_self_write(path)
+        self._index = Index.build(vault_root)
+        self._index_root = vault_root
+        self.notify(f"Captured: {path.name}", severity="information", timeout=3)
+        await self.open_note(path, vault_root=vault_root)
 
     def _refresh_bookmarks(self) -> None:
         """

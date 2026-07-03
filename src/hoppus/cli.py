@@ -7,9 +7,10 @@ Fully implemented here: ``vaults`` (list vaults under the Vaults Root) and
 HOPPUS-40), plus ``doctor`` (environment health report, spec §7.5,
 HOPPUS-43), ``find`` (standalone fzf-powered fuzzy search, spec §10 / §3,
 HOPPUS-46), ``daily`` (open/create today's daily note, spec §9.9,
-HOPPUS-49), and the dispatch/skeleton for every always-available
+HOPPUS-49), ``capture`` (quick-capture to the inbox, spec §9.11,
+HOPPUS-51), and the dispatch/skeleton for every always-available
 subcommand. Subcommands owned by later stories (``new``,
-``capture``, ``preview``, ``index``/``reindex``, ``mcp``) and
+``preview``, ``index``/``reindex``, ``mcp``) and
 the TUI launch are registered as clearly-marked stubs so ``--help`` shows
 the full command tree.
 """
@@ -20,6 +21,7 @@ from pathlib import Path
 import typer
 
 from hoppus import __version__
+from hoppus.capture import capture_note
 from hoppus.config import load_config
 from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
@@ -204,9 +206,33 @@ def capture(
     text: str = typer.Argument(None, help="Text to capture to the inbox."),
 ) -> None:
     """
-    Quick-capture to the inbox folder (spec §10).
+    Quick-capture to the inbox folder (spec §10, §9.11, HOPPUS-51).
+
+    Drops a timestamp-named note into the configured ``inbox.folder``
+    (default ``"."`` — the vault root, GTD convention) of the default
+    vault. The optional TEXT argument becomes the note body; the
+    filename is always the timestamp. Prints the created note's
+    absolute path.
     """
-    _stub("capture")
+    config = load_config()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        path = capture_note(selected.path, config, text=text or "", now=datetime.now())
+    except (ValueError, FileExistsError, OSError) as error:
+        typer.secho(str(error), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(str(path))
 
 
 @app.command()
