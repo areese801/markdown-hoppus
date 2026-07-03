@@ -11,6 +11,8 @@ defaults come from spec §9.16 and are remappable via the ``keymap``
 config section (see ``hoppus.tui.keymap``).
 """
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +31,16 @@ from textual.widgets import (
     Tabs,
 )
 
+from hoppus import integrity
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.index.watcher import VaultWatcher
+from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
+from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.backlinks import BacklinksPane
@@ -477,8 +482,118 @@ class HoppusApp(App[None]):
         self._not_implemented("Search")
 
     def action_open_editor(self) -> None:
-        """Open in $EDITOR (later story)."""
-        self._not_implemented("Open in $EDITOR")
+        """
+        Open the active note in ``$EDITOR`` (spec §9.6, HOPPUS-39).
+
+        Resolves the editor argv from ``$VISUAL``/``$EDITOR`` (fallback
+        ``nvim``), suspends the TUI's alternate screen, and runs the
+        editor as a subprocess. On return, a worker runs the
+        link-integrity pass (spec §7.3, D1: editor-return only), then
+        reindexes and refreshes the preview. Failures notify — the app
+        never crashes over a broken editor setup.
+        """
+        path = self._pending_editor_path
+        self._pending_editor_path = None
+        if path is None and self.preview.note_path is not None:
+            path = Path(self.preview.note_path)
+        if path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        argv = integrity.resolve_editor_command(os.environ)
+        try:
+            with self.suspend():
+                subprocess.run([*argv, str(path)])
+        except Exception as error:
+            self.notify(f"Editor failed: {error}", severity="error", timeout=5)
+            return
+        self.run_worker(self._after_editor(path), exclusive=False)
+
+    async def _after_editor(self, path: Path) -> None:
+        """
+        Post-editor pipeline: integrity pass, reindex, preview refresh.
+
+        Runs as a Textual worker so the integrity pass can await modal
+        results via ``push_screen_wait``.
+
+        :param path: The note that was just edited.
+        """
+        await self._run_integrity_pass(path)
+        vault_root = self._active_vault_path()
+        if vault_root.is_dir():
+            self._index = Index.build(vault_root)
+            self._index_root = vault_root
+            await self.open_note(path, vault_root=vault_root)
+
+    async def _prompt_unresolved(
+        self, unresolved: integrity.UnresolvedWikilink
+    ) -> integrity.Decision:
+        """
+        Push one §7.3 prompt and await the user's decision.
+
+        Factored out so headless tests can stub the modal loop and
+        drive :meth:`_run_integrity_pass` with canned decisions.
+
+        :param unresolved: The unresolved occurrence to prompt about.
+        :returns: The user's decision (a dismissed modal counts as
+            skip).
+        """
+        result = await self.push_screen_wait(LinkIntegrityModal(unresolved))
+        return result if result is not None else ("skip", None)
+
+    async def _run_integrity_pass(self, path: Path) -> None:
+        """
+        Run the link-integrity pass on an edited note (spec §7.3, D1).
+
+        Reads the file, rebuilds the index, and prompts sequentially —
+        one modal per unresolved wikilink, in document order. Decisions
+        are collected first and applied by
+        :func:`hoppus.integrity.apply_integrity_decisions`, which
+        rewrites corrections in reverse offset order (so every recorded
+        span stays valid) and bootstraps created notes at the vault
+        root with the prose untouched. The file is written back only
+        when its text changed, and the index is rebuilt afterwards.
+
+        :param path: The note to check.
+        """
+        if not self.config.get("link_integrity", {}).get(
+            "enforce_no_dangling_wikilinks", True
+        ):
+            return
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir() or not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8")
+        index = Index.build(vault_root)
+        self._index = index
+        self._index_root = vault_root
+        unresolved = integrity.find_unresolved_wikilinks(text, index, path)
+        if not unresolved:
+            return
+
+        decisions: list[integrity.Decision] = []
+        for occurrence in unresolved:
+            decisions.append(await self._prompt_unresolved(occurrence))
+
+        resolver = Resolver(
+            list(index.notes_by_path.values()),
+            vault_root,
+            attachments=index._attachments,
+        )
+        try:
+            new_text, created = integrity.apply_integrity_decisions(
+                text, unresolved, decisions, vault_root, resolver
+            )
+        except (ValueError, FileExistsError) as error:
+            self.notify(f"Link repair failed: {error}", severity="error", timeout=5)
+            return
+        if new_text != text:
+            self._suppress_self_write(path)
+            path.write_text(new_text, encoding="utf-8")
+        if created:
+            self._suppress_self_write(*created)
+        if created or new_text != text:
+            self._index = Index.build(vault_root)
+            self._index_root = vault_root
 
     def action_open_system(self) -> None:
         """Open in system app (later story)."""
