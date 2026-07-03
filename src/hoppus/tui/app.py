@@ -1,25 +1,29 @@
 """
 The Textual App: three-region layout, keymap, and status line (spec §9.1).
 
-Regions: a tabbed left sidebar (Explorer · Tags · Bookmarks), a main pane,
-and a toggleable right sidebar (Backlinks). A header/status line shows the
-current vault name, active note title, and word count; a footer shows key
-hints. Pane content is placeholder-only — real panes arrive in later
-stories. The keymap defaults come from spec §9.16 and are remappable via
-the ``keymap`` config section (see ``hoppus.tui.keymap``).
+Regions: a tabbed left sidebar (Explorer · Tags · Bookmarks), a main pane
+hosting the note preview (spec §9.5), and a toggleable right sidebar
+(Backlinks). A header/status line shows the current vault name, active
+note title, and word count; a footer shows key hints. Sidebar content is
+placeholder-only — real panes arrive in later stories. The keymap
+defaults come from spec §9.16 and are remappable via the ``keymap``
+config section (see ``hoppus.tui.keymap``).
 """
 
 from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Static, TabbedContent, TabPane, Tabs
+from textual.widgets import Footer, Markdown, Static, TabbedContent, TabPane, Tabs
 
 from hoppus.config import load_config
+from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
+from hoppus.tui.panes.preview import PreviewPane
 
 
 class PanePlaceholder(Static):
@@ -68,7 +72,10 @@ class HoppusApp(App[None]):
     """
 
     TITLE = "hoppus"
-    BINDINGS = default_bindings()  # type: ignore[assignment]
+    BINDINGS = [  # type: ignore[assignment]
+        *default_bindings(),
+        Binding("m", "toggle_raw", "Raw view", show=False, id="toggle_raw"),
+    ]
 
     CSS = """
     #status-line {
@@ -138,7 +145,7 @@ class HoppusApp(App[None]):
                     yield PanePlaceholder("Tag pane", id="tags-placeholder")
                 with TabPane("Bookmarks", id="tab-bookmarks"):
                     yield PanePlaceholder("Bookmarks", id="bookmarks-placeholder")
-            yield PanePlaceholder("Preview / main pane", id="main-pane")
+            yield PreviewPane(self.config, id="main-pane")
             with Vertical(id="right-sidebar"):
                 yield Static("Backlinks", classes="sidebar-title")
                 yield PanePlaceholder(
@@ -177,6 +184,50 @@ class HoppusApp(App[None]):
     def watch_word_count(self) -> None:
         """React to word-count changes."""
         self._refresh_status_line()
+
+    # -- Preview -------------------------------------------------------------
+
+    @property
+    def preview(self) -> PreviewPane:
+        """The main-pane note preview (spec §9.5)."""
+        return self.query_one("#main-pane", PreviewPane)
+
+    async def open_note(self, path: Path, vault_root: Path | None = None) -> None:
+        """
+        Show a note in the preview pane.
+
+        Args:
+            path: Path to the ``.md`` note.
+            vault_root: Optional vault root for resolving clicked links;
+                when omitted the preview keeps its current vault root.
+        """
+        preview = self.preview
+        if vault_root is not None:
+            preview.vault_root = vault_root
+        await preview.set_note(path)
+
+    async def action_toggle_raw(self) -> None:
+        """
+        Toggle the preview between rendered and raw Syntax views.
+        """
+        await self.preview.toggle_raw()
+
+    async def on_markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        """
+        Navigate ``hoppus://`` links clicked in the preview (spec §9.5).
+
+        Non-``hoppus://`` hrefs (e.g. ``http://``) are out of scope here;
+        unresolved targets produce a gentle notification.
+        """
+        target = decode_href(event.href)
+        if target is None:
+            return
+        event.stop()
+        if not await self.preview.open_target(target):
+            label = target.display or target.target or f"#{target.anchor}"
+            self.notify(
+                f"Couldn't resolve link: {label}", severity="warning", timeout=3
+            )
 
     # -- Pane navigation ----------------------------------------------------
 
