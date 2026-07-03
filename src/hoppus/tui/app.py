@@ -486,8 +486,13 @@ class HoppusApp(App[None]):
         self._not_implemented("Daily note")
 
     def action_new_note(self) -> None:
-        """New note (later story)."""
-        self._not_implemented("New note")
+        """
+        Create a new note via the explorer's flow (spec §9.2, HOPPUS-34).
+
+        Delegates to the File Explorer pane, which prompts for a name
+        and creates the note at the vault root (GTD, spec §5.2).
+        """
+        self.query_one("#explorer-pane", ExplorerPane).action_new_note()
 
     def action_new_note_from_template(self) -> None:
         """New note from template (later story)."""
