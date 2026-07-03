@@ -9,7 +9,8 @@ import asyncio
 from typing import Any
 
 from hoppus.config import default_config
-from hoppus.tui.app import HoppusApp, PanePlaceholder, StatusLine
+from hoppus.tui.app import HoppusApp, StatusLine
+from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.keymap import (
     DEFAULT_KEYMAP,
     default_bindings,
@@ -51,7 +52,7 @@ def test_app_mounts_with_three_regions() -> None:
                 "tab-tags",
                 "tab-bookmarks",
             }
-            assert app.query_one("#backlinks-placeholder", PanePlaceholder)
+            assert app.query_one("#backlinks-pane", BacklinksPane)
             assert app.query_one(StatusLine)
             assert app.query_one("Footer")
 

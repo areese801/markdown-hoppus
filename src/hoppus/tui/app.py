@@ -36,6 +36,7 @@ from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
+from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
 from hoppus.vault import discover_vaults
@@ -119,6 +120,10 @@ class HoppusApp(App[None]):
         text-style: bold;
         padding: 0 1;
     }
+    #backlinks-pane {
+        height: 1fr;
+        border: none;
+    }
     PanePlaceholder:focus {
         background: $boost;
     }
@@ -150,6 +155,10 @@ class HoppusApp(App[None]):
         # Stashed by the quick switcher's editor path for the future
         # $EDITOR handoff story (spec §9.6).
         self._pending_editor_path: Path | None = None
+        # Cached active-vault index for the backlinks pane (HOPPUS-32);
+        # HOPPUS-33's unlinked mentions will reuse it.
+        self._index: Index | None = None
+        self._index_root: Path | None = None
 
     def compose(self) -> ComposeResult:
         """
@@ -167,9 +176,7 @@ class HoppusApp(App[None]):
             yield PreviewPane(self.config, id="main-pane")
             with Vertical(id="right-sidebar"):
                 yield Static("Backlinks", classes="sidebar-title")
-                yield PanePlaceholder(
-                    "Backlinks & unlinked mentions", id="backlinks-placeholder"
-                )
+                yield BacklinksPane(id="backlinks-pane")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -261,6 +268,26 @@ class HoppusApp(App[None]):
         if vault_root is not None:
             preview.vault_root = vault_root
         await preview.set_note(path)
+        root = vault_root if vault_root is not None else preview.vault_root
+        if root is not None and root.is_dir():
+            self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
+                path, self._active_index(root), root
+            )
+
+    def _active_index(self, vault_root: Path) -> Index:
+        """
+        Return the cached index for the active vault, building it once.
+
+        Rebuilds when ``vault_root`` differs from the cached root;
+        :meth:`switch_vault` invalidates the cache on vault change.
+
+        Args:
+            vault_root: The vault root to index.
+        """
+        if self._index is None or self._index_root != vault_root:
+            self._index = Index.build(vault_root)
+            self._index_root = vault_root
+        return self._index
 
     async def action_toggle_raw(self) -> None:
         """
@@ -303,7 +330,7 @@ class HoppusApp(App[None]):
         ]
         right = self.right_sidebar
         if right.display:
-            targets.append((right, self.query_one("#backlinks-placeholder")))
+            targets.append((right, self.query_one("#backlinks-pane")))
         return targets
 
     def action_cycle_pane(self) -> None:
@@ -491,5 +518,8 @@ class HoppusApp(App[None]):
         preview = self.preview
         await preview.clear()
         preview.vault_root = vault_path
+        self._index = None
+        self._index_root = None
+        self.query_one("#backlinks-pane", BacklinksPane).clear()
         self.note_title = None
         self.word_count = None
