@@ -39,6 +39,7 @@ from typing import Any
 from hoppus.fileops import create_note
 from hoppus.index.indexer import Index
 from hoppus.model import Link, Note
+from hoppus.parse.frontmatter import frontmatter_parse_error
 from hoppus.parse.links import Resolver
 from hoppus.parse.ofm import (
     _MD_LINK_RE,
@@ -55,6 +56,7 @@ KIND_UNRESOLVED_WIKILINK = "unresolved_wikilink"
 KIND_BROKEN_ANCHOR = "broken_anchor"
 KIND_MISSING_ATTACHMENT = "missing_attachment"
 KIND_BROKEN_MARKDOWN_LINK = "broken_markdown_link"
+KIND_INVALID_FRONTMATTER = "invalid_frontmatter"
 
 #: File extensions treated as attachments — unresolved refs to these are
 #: report-only (spec §7.4), never part of the correct-or-create prompts.
@@ -298,11 +300,14 @@ class AuditIssue:
     (spec §10, §19 D1).
 
     :param note_path: Path of the note containing the issue.
-    :param target: The link's raw target as written.
+    :param target: The link's raw target as written; for
+        :data:`KIND_INVALID_FRONTMATTER` issues, a one-line description
+        of the YAML parse failure instead.
     :param kind: One of the ``KIND_*`` constants:
         :data:`KIND_UNRESOLVED_WIKILINK`, :data:`KIND_BROKEN_ANCHOR`,
-        :data:`KIND_MISSING_ATTACHMENT`, or
-        :data:`KIND_BROKEN_MARKDOWN_LINK`.
+        :data:`KIND_MISSING_ATTACHMENT`,
+        :data:`KIND_BROKEN_MARKDOWN_LINK`, or
+        :data:`KIND_INVALID_FRONTMATTER`.
     :param display: The link's ``|display`` text, or None.
     :param anchor: The link's ``#anchor`` part, or None.
     :param is_wikilink: True for ``[[...]]``; False for ``[text](path)``.
@@ -423,6 +428,11 @@ def audit_note(
       gated by ``warn_missing_anchor`` → :data:`KIND_BROKEN_ANCHOR`.
       Never auto-created — report only.
 
+    Additionally, a frontmatter block that fails to parse as YAML
+    (treated leniently as frontmatter-less by the index, matching
+    Obsidian) is always reported as :data:`KIND_INVALID_FRONTMATTER`,
+    emitted first with the parse failure as its ``target``.
+
     :param text: The note's full original text.
     :param index: The built vault index to resolve against.
     :param note_path: Path of the note containing the links.
@@ -442,6 +452,20 @@ def audit_note(
     masked = _mask(text)
 
     found: list[tuple[int, AuditIssue]] = []
+
+    frontmatter_error = frontmatter_parse_error(text)
+    if frontmatter_error is not None:
+        found.append(
+            (
+                -1,
+                AuditIssue(
+                    note_path=note_path,
+                    target=frontmatter_error,
+                    kind=KIND_INVALID_FRONTMATTER,
+                    is_wikilink=False,
+                ),
+            )
+        )
 
     if check_wikilinks:
         for occurrence in find_unresolved_wikilinks(text, index, note_path):

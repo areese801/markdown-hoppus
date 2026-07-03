@@ -13,7 +13,7 @@ import io
 import re
 from typing import Any
 
-from ruamel.yaml import YAML
+from ruamel.yaml import YAML, YAMLError
 from ruamel.yaml.comments import CommentedMap
 
 _DELIMITER = "---"
@@ -65,18 +65,53 @@ def split_frontmatter(text: str) -> tuple[CommentedMap, str]:
     Handles notes with no frontmatter (empty mapping, full text returned
     as body), an empty frontmatter block, and standard frontmatter.
 
+    Invalid frontmatter — a block that fails to parse as YAML (e.g.
+    Obsidian template placeholders like ``{{date}}``) or that parses to
+    a non-mapping — is treated as frontmatter-less, matching Obsidian's
+    leniency: an empty mapping is returned and the note stays usable.
+    Use :func:`frontmatter_parse_error` to detect and report this case.
+
     :param text: Full note text.
     :returns: ``(frontmatter, body)`` where ``frontmatter`` is a
-        round-trip-capable mapping (empty when absent) and ``body`` is the
-        note text after the closing delimiter.
+        round-trip-capable mapping (empty when absent or invalid) and
+        ``body`` is the note text after the closing delimiter.
     """
     raw, body = _split_raw(text)
     if raw is None:
         return CommentedMap(), body
-    data = _make_yaml().load(raw)
-    if data is None:
+    try:
+        data = _make_yaml().load(raw)
+    except YAMLError:
+        return CommentedMap(), body
+    if data is None or not isinstance(data, CommentedMap):
         return CommentedMap(), body
     return data, body
+
+
+def frontmatter_parse_error(text: str) -> str | None:
+    """
+    Report why a note's frontmatter block is invalid, if it is.
+
+    Complements the leniency of :func:`split_frontmatter`: callers that
+    surface problems (the audit path) use this to flag notes whose
+    frontmatter was silently treated as absent.
+
+    :param text: Full note text.
+    :returns: A one-line description of the parse failure, or None when
+        the note has no frontmatter block or it parses to a mapping (or
+        an empty block).
+    """
+    raw, _body = _split_raw(text)
+    if raw is None:
+        return None
+    try:
+        data = _make_yaml().load(raw)
+    except YAMLError as error:
+        first_line = str(error).strip().splitlines()
+        return first_line[0] if first_line else "invalid YAML"
+    if data is not None and not isinstance(data, CommentedMap):
+        return f"frontmatter is not a mapping (got {type(data).__name__})"
+    return None
 
 
 def update_frontmatter_key(text: str, key: str, value: Any) -> str:

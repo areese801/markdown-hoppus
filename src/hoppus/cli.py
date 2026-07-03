@@ -30,7 +30,7 @@ from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
-from hoppus.integrity import AuditIssue, audit_vault
+from hoppus.integrity import KIND_INVALID_FRONTMATTER, AuditIssue, audit_vault
 from hoppus.mcp import server as mcp_server
 from hoppus.render.browser import (
     go_grip_available,
@@ -358,9 +358,10 @@ def _format_issue(issue: AuditIssue) -> str:
     Render an audit issue as its written link form plus a kind label.
 
     Wikilinks render as ``[[target#anchor|display]]`` (embeds keep the
-    ``!``); markdown links render as ``[display](target)``. The label
-    is the issue kind with underscores spaced, e.g. ``(broken anchor)``
-    — plain and greppable.
+    ``!``); markdown links render as ``[display](target)``; invalid
+    frontmatter renders its parse-failure description. The label is the
+    issue kind with underscores spaced, e.g. ``(broken anchor)`` —
+    plain and greppable.
 
     Args:
         issue: The audit issue to render.
@@ -369,6 +370,8 @@ def _format_issue(issue: AuditIssue) -> str:
         The rendered line fragment, e.g. ``![[img.png]] (missing
         attachment)``.
     """
+    if issue.kind == KIND_INVALID_FRONTMATTER:
+        return f"{issue.target} (invalid frontmatter)"
     if issue.is_wikilink:
         inner = issue.target
         if issue.anchor:
