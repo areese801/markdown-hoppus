@@ -33,7 +33,7 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import bookmarks, daily, fileops, integrity, related, templates
+from hoppus import bookmarks, daily, fileops, integrity, related, stats, templates
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
@@ -49,6 +49,7 @@ from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
 from hoppus.tui.modals.search_screen import SearchScreen
+from hoppus.tui.modals.stats_screen import StatsScreen
 from hoppus.tui.modals.template_picker import TemplatePickerModal
 from hoppus.tui.modals.text_prompt import TextPromptModal
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
@@ -88,6 +89,7 @@ class StatusLine(Static):
         note_title: str | None,
         word_count: int | None,
         problems: int | None = None,
+        char_count: int | None = None,
     ) -> None:
         """
         Re-render the status line from the app's reactive state.
@@ -99,11 +101,16 @@ class StatusLine(Static):
             problems: Report-only integrity issue count (spec §19 D1);
                 the ⚠ segment appears only when this is > 0, so the
                 string is unchanged for None/0.
+            char_count: Active note character count (spec §9.13); the
+                chars segment appears only when this is not None, so
+                the string is unchanged for None.
         """
         vault = vault_name or "(no vault)"
         title = note_title or "(no note)"
         words = "– words" if word_count is None else f"{word_count} words"
         status = f" hoppus · {vault} · {title} · {words}"
+        if char_count is not None:
+            status += f" · {char_count} chars"
         if problems:
             status += f" · ⚠ {problems} problems"
         self.update(status)
@@ -126,6 +133,7 @@ class HoppusApp(App[None]):
             show=False,
             id="unlinked_mentions",
         ),
+        Binding("w", "vault_stats", "Vault stats", show=False, id="vault_stats"),
     ]
 
     CSS = """
@@ -166,6 +174,7 @@ class HoppusApp(App[None]):
     vault_name: reactive[str | None] = reactive(None)
     note_title: reactive[str | None] = reactive(None)
     word_count: reactive[int | None] = reactive(None)
+    char_count: reactive[int | None] = reactive(None)
 
     def __init__(
         self,
@@ -283,6 +292,7 @@ class HoppusApp(App[None]):
             self.note_title,
             self.word_count,
             problems=self._problem_count,
+            char_count=self.char_count,
         )
 
     def _refresh_problems(self) -> None:
@@ -323,6 +333,10 @@ class HoppusApp(App[None]):
         """React to word-count changes."""
         self._refresh_status_line()
 
+    def watch_char_count(self) -> None:
+        """React to char-count changes (spec §9.13)."""
+        self._refresh_status_line()
+
     # -- Preview -------------------------------------------------------------
 
     @property
@@ -343,6 +357,10 @@ class HoppusApp(App[None]):
         if vault_root is not None:
             preview.vault_root = vault_root
         await preview.set_note(path)
+        try:
+            self.char_count = stats.count_chars(path.read_text(encoding="utf-8"))
+        except OSError:
+            self.char_count = None
         root = vault_root if vault_root is not None else preview.vault_root
         if root is not None and root.is_dir():
             self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
@@ -1068,6 +1086,27 @@ class HoppusApp(App[None]):
         self._refresh_problems()
         self.notify("Reindexed", severity="information", timeout=3)
 
+    def action_vault_stats(self) -> None:
+        """
+        Show the vault statistics view (spec §9.13, HOPPUS-53, key ``w``).
+
+        Builds (or reuses) the active vault's index, aggregates it via
+        the pure :func:`hoppus.stats.compute_vault_stats`, and pushes a
+        read-only :class:`StatsScreen`. Fully guarded — no open vault
+        or a failed index/aggregation notifies instead of crashing.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            self.notify("Vault stats: no open vault", severity="information", timeout=3)
+            return
+        try:
+            index = self._active_index(vault_root)
+            vault_stats = stats.compute_vault_stats(index, config=self.config)
+        except Exception as error:
+            self.notify(f"Vault stats failed: {error}", severity="error", timeout=5)
+            return
+        self.push_screen(StatsScreen(vault_stats))
+
     # -- Vault switching -------------------------------------------------------
 
     def action_vault_switcher(self) -> None:
@@ -1128,5 +1167,6 @@ class HoppusApp(App[None]):
         self.query_one("#backlinks-pane", BacklinksPane).clear()
         self.note_title = None
         self.word_count = None
+        self.char_count = None
         self._refresh_problems()
         self._refresh_bookmarks()
