@@ -32,6 +32,7 @@ from textual.widgets import (
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.render.ofm_markdown import decode_href
+from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.panes.explorer import ExplorerPane
@@ -84,6 +85,7 @@ class HoppusApp(App[None]):
     """
 
     TITLE = "hoppus"
+    COMMANDS = App.COMMANDS | {HoppusCommandProvider}
     BINDINGS = [  # type: ignore[assignment]
         *default_bindings(),
         Binding("m", "toggle_raw", "Raw view", show=False, id="toggle_raw"),
