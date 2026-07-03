@@ -144,7 +144,9 @@ def _search_python(query: str, files: Iterable[Path]) -> list[ContentMatch]:
     """
     Pure-Python content scan — the zero-binary reference backend.
 
-    Reads each file (skipping any that raise ``OSError``), splits it into
+    Reads each file (skipping any that raise ``OSError`` or
+    ``UnicodeDecodeError`` — rg likewise treats non-UTF-8 files as
+    binary), splits it into
     lines without re-adding newlines, and records one match per line that
     contains the query case-insensitively. Only the first hit per line is
     reported (its 0-based column), matching rg's per-line output.
@@ -158,7 +160,7 @@ def _search_python(query: str, files: Iterable[Path]) -> list[ContentMatch]:
     for path in files:
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         for index, line in enumerate(text.splitlines(), start=1):
             column = line.lower().find(needle)
@@ -223,7 +225,7 @@ def _search_ripgrep(
             timeout=RIPGREP_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return _search_python(query, _md_files(vault_root, notes))
     if completed.returncode == 1:
         return []

@@ -148,7 +148,13 @@ def plan_rename(
 
     plan = RenamePlan(old_path=old_path, new_path=new_path)
     for note in pre_notes:
-        text = read_text(note.path)
+        # An unreadable/non-UTF-8 note carries no indexed links, so it
+        # cannot need rewrites; skipping keeps its bytes untouched (D4)
+        # and one bad file never aborts the rename (HOPPUS-73).
+        try:
+            text = read_text(note.path)
+        except (OSError, UnicodeDecodeError):
+            continue
         rewritten, count = _rewrite_note(text, note, pre_resolver, old_path, new_target)
         if count:
             plan.changes[note.path] = rewritten
@@ -316,7 +322,10 @@ def _resimplify(
     for note in post_notes:
         if note.path in skip:
             continue
-        text = read_text(note.path)
+        try:
+            text = read_text(note.path)
+        except (OSError, UnicodeDecodeError):
+            continue
         rewritten, rewrites = _rewrite_targets(text, note, pre_resolver, targets)
         if rewrites:
             changes[note.path] = rewritten

@@ -185,7 +185,7 @@ def _transclusion(
         return f"> ⚠ cyclic embed: {written}"
     try:
         raw = read_text(resolved)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return f"> ⚠ unreadable embed: {written}"
     if link.anchor is None:
         _, content = split_frontmatter(raw)

@@ -23,7 +23,7 @@ from textual.widgets import Markdown, Static
 from textual.widgets.markdown import MarkdownBlock
 
 from hoppus.index.indexer import Index, build_note
-from hoppus.model import Link
+from hoppus.model import Link, Note
 from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import LinkTarget, transform_ofm
 from hoppus.render.terminal import (
@@ -92,14 +92,22 @@ class PreviewPane(VerticalScroll):
         content and marks unresolved wikilinks with a subtle indicator
         (spec §9.5); raw mode keeps showing the untouched note text.
 
+        A file that cannot be read or decoded as UTF-8 never crashes
+        the pane (HOPPUS-73): a one-line placeholder is shown instead.
+
         Args:
             path: Path to the ``.md`` note to preview.
         """
         path = Path(path)
-        self._text = path.read_text(encoding="utf-8")
+        try:
+            self._text = path.read_text(encoding="utf-8")
+            note = build_note(path)
+        except (OSError, UnicodeDecodeError) as error:
+            summary = " ".join(f"{type(error).__name__}: {error}".split())
+            self._text = f"> ⚠ unreadable file: {summary}"
+            note = Note(title=path.stem, path=path)
         self.note_path = path
         await self._refresh_view()
-        note = build_note(path)
         app = self.app
         if hasattr(app, "note_title"):
             app.note_title = note.title

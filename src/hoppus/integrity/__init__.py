@@ -57,6 +57,7 @@ KIND_BROKEN_ANCHOR = "broken_anchor"
 KIND_MISSING_ATTACHMENT = "missing_attachment"
 KIND_BROKEN_MARKDOWN_LINK = "broken_markdown_link"
 KIND_INVALID_FRONTMATTER = "invalid_frontmatter"
+KIND_UNREADABLE_FILE = "unreadable_file"
 
 #: File extensions treated as attachments — unresolved refs to these are
 #: report-only (spec §7.4), never part of the correct-or-create prompts.
@@ -311,12 +312,15 @@ class AuditIssue:
     :param note_path: Path of the note containing the issue.
     :param target: The link's raw target as written; for
         :data:`KIND_INVALID_FRONTMATTER` issues, a one-line description
-        of the YAML parse failure instead.
+        of the YAML parse failure instead; for
+        :data:`KIND_UNREADABLE_FILE` issues, a one-line description of
+        the read/decode failure.
     :param kind: One of the ``KIND_*`` constants:
         :data:`KIND_UNRESOLVED_WIKILINK`, :data:`KIND_BROKEN_ANCHOR`,
         :data:`KIND_MISSING_ATTACHMENT`,
-        :data:`KIND_BROKEN_MARKDOWN_LINK`, or
-        :data:`KIND_INVALID_FRONTMATTER`.
+        :data:`KIND_BROKEN_MARKDOWN_LINK`,
+        :data:`KIND_INVALID_FRONTMATTER`, or
+        :data:`KIND_UNREADABLE_FILE`.
     :param display: The link's ``|display`` text, or None.
     :param anchor: The link's ``#anchor`` part, or None.
     :param is_wikilink: True for ``[[...]]``; False for ``[text](path)``.
@@ -560,9 +564,12 @@ def audit_vault(
     missing attachments, and broken markdown links, each gated by its
     ``link_integrity`` toggle (spec §7.6). A None config runs all four
     checks, matching the config defaults. Notes whose text cannot be
-    read (``OSError``) are skipped. This is the shared core behind
-    ``hop audit`` and the TUI "problems" indicator: it never prompts,
-    mutates, or creates anything.
+    read or decoded as UTF-8 (``OSError``, ``UnicodeDecodeError``) are
+    not link-audited; instead each is reported as a single
+    :data:`KIND_UNREADABLE_FILE` issue (HOPPUS-73), so one bad file
+    never aborts the audit yet is never silently dropped. This is the
+    shared core behind ``hop audit`` and the TUI "problems" indicator:
+    it never prompts, mutates, or creates anything.
 
     :param index: The built vault index to audit.
     :param config: The merged configuration mapping (spec §12), or None
@@ -587,7 +594,15 @@ def audit_vault(
     for note_path in sorted(index.notes_by_path):
         try:
             text = read_text(note_path)
-        except OSError:
+        except (OSError, UnicodeDecodeError) as error:
+            issues.append(
+                AuditIssue(
+                    note_path=note_path,
+                    target=" ".join(f"{type(error).__name__}: {error}".split()),
+                    kind=KIND_UNREADABLE_FILE,
+                    is_wikilink=False,
+                )
+            )
             continue
         issues.extend(
             audit_note(text, index, note_path, config=config, resolver=resolver)

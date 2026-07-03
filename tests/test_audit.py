@@ -102,9 +102,11 @@ def test_audit_vault_captures_display_and_anchor(tmp_path: Path) -> None:
     )
 
 
-def test_audit_vault_skips_unreadable_notes(tmp_path: Path) -> None:
+def test_audit_vault_reports_unreadable_notes(tmp_path: Path) -> None:
     """
-    A note whose text cannot be read is skipped, not fatal.
+    A note whose text cannot be read is reported as an
+    ``unreadable_file`` issue, never fatal and never silently dropped
+    (HOPPUS-73).
     """
     vault = make_vault(tmp_path)
     index = Index.build(vault)
@@ -119,7 +121,11 @@ def test_audit_vault_skips_unreadable_notes(tmp_path: Path) -> None:
         return path.read_text(encoding="utf-8")
 
     report = audit_vault(index, read_text=read_text)
-    assert [issue.target for issue in report.issues] == ["Nowhere"]
+    assert [(issue.kind, issue.target) for issue in report.issues] == [
+        ("unreadable_file", "OSError: unreadable"),
+        ("unresolved_wikilink", "Nowhere"),
+    ]
+    assert report.issues[0].note_path == broken
 
 
 def test_audit_vault_clean_and_empty_vaults_report_zero(tmp_path: Path) -> None:

@@ -31,7 +31,12 @@ from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
-from hoppus.integrity import KIND_INVALID_FRONTMATTER, AuditIssue, audit_vault
+from hoppus.integrity import (
+    KIND_INVALID_FRONTMATTER,
+    KIND_UNREADABLE_FILE,
+    AuditIssue,
+    audit_vault,
+)
 from hoppus.mcp import server as mcp_server
 from hoppus.mcp.tools import NoteNotFound, resolve_note
 from hoppus.render.browser import (
@@ -367,7 +372,11 @@ def preview(
         typer.echo(f"Rendering {note} with go-grip (localhost)")
         return
 
-    text = note.read_text(encoding="utf-8")
+    try:
+        text = note.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        typer.secho(f"Cannot read {note}: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from error
     html_path = write_preview_html(text, title=note.stem)
     open_in_browser(html_path)
     typer.echo(str(html_path))
@@ -425,7 +434,8 @@ def _format_issue(issue: AuditIssue) -> str:
 
     Wikilinks render as ``[[target#anchor|display]]`` (embeds keep the
     ``!``); markdown links render as ``[display](target)``; invalid
-    frontmatter renders its parse-failure description. The label is the
+    frontmatter and unreadable files render their one-line failure
+    description. The label is the
     issue kind with underscores spaced, e.g. ``(broken anchor)`` —
     plain and greppable.
 
@@ -436,8 +446,8 @@ def _format_issue(issue: AuditIssue) -> str:
         The rendered line fragment, e.g. ``![[img.png]] (missing
         attachment)``.
     """
-    if issue.kind == KIND_INVALID_FRONTMATTER:
-        return f"{issue.target} (invalid frontmatter)"
+    if issue.kind in (KIND_INVALID_FRONTMATTER, KIND_UNREADABLE_FILE):
+        return f"{issue.target} ({issue.kind.replace('_', ' ')})"
     if issue.is_wikilink:
         inner = issue.target
         if issue.anchor:

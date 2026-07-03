@@ -54,6 +54,26 @@ def build_note(path: Path) -> Note:
     )
 
 
+def _stub_note(path: Path) -> Note:
+    """
+    Build a content-less placeholder ``Note`` for an unreadable file.
+
+    Used when a ``.md`` file cannot be decoded as UTF-8 or read at all
+    (HOPPUS-73): the file stays present in the index (so links to it
+    still resolve and it shows up in listings), but none of its content
+    is indexed. The audit surfaces it as an ``unreadable_file`` problem.
+
+    :param path: Path to the unreadable ``.md`` file.
+    :returns: A ``Note`` with only the title, path, and (best-effort)
+        mtime populated.
+    """
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return Note(title=path.stem, path=path, mtime=mtime)
+
+
 def _scan_file(path: Path) -> tuple[Note, list[Link], set[str]]:
     """
     Parse one ``.md`` file into its note, outbound links, and tag names.
@@ -157,13 +177,20 @@ class Index:
         ``Resolver`` built from the complete note set and computes
         backlinks.
 
+        A file that cannot be read or decoded as UTF-8 never aborts the
+        build (HOPPUS-73): it is indexed as a content-less stub note and
+        the audit reports it as an ``unreadable_file`` problem.
+
         :param vault_root: The vault root directory.
         :returns: The populated index.
         """
         index = cls(vault_root)
         note_paths, index._attachments = _iter_vault_files(vault_root)
         for path in note_paths:
-            note, links, tags = _scan_file(path)
+            try:
+                note, links, tags = _scan_file(path)
+            except (UnicodeDecodeError, OSError):
+                note, links, tags = _stub_note(path), [], set()
             index._add_note(note, links, tags)
         resolver = index._make_resolver()
         for path in index.links:
@@ -183,6 +210,9 @@ class Index:
         target a name this note carried before or after the change).
         Backlinks are recomputed from the updated link maps.
 
+        A file that cannot be read or decoded as UTF-8 is re-indexed as
+        a content-less stub note instead of raising (HOPPUS-73).
+
         :param path: Path to the ``.md`` file that changed.
         """
         path = Path(path)
@@ -193,7 +223,10 @@ class Index:
             affected_names.update(alias.lower() for alias in old_note.aliases)
             self._remove_note(old_note)
         if path.is_file():
-            note, links, tags = _scan_file(path)
+            try:
+                note, links, tags = _scan_file(path)
+            except (UnicodeDecodeError, OSError):
+                note, links, tags = _stub_note(path), [], set()
             affected_names.add(note.title.lower())
             affected_names.update(alias.lower() for alias in note.aliases)
             self._add_note(note, links, tags)

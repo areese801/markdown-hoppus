@@ -87,7 +87,7 @@ def find_unlinked_mentions(
             continue
         try:
             text = read_text(path)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         masked = _mask(text)
         masked = _WIKILINK_RE.sub(_blank, masked)
