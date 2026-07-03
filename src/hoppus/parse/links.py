@@ -58,19 +58,26 @@ class Resolver:
         :param attachments: Non-``.md`` attachment file paths.
         """
         self._vault_root = vault_root
+        self._root_parts = vault_root.parts
         self._notes = list(notes)
         self._attachments = list(attachments or [])
 
         self._note_parts: dict[Path, tuple[str, ...]] = {}
+        self._notes_by_path: dict[Path, Note] = {}
         self._alias_index: dict[str, list[Note]] = {}
         for note in self._notes:
             rel = self._relative_parts(note.path)
             self._note_parts[note.path] = (*rel[:-1], PurePosixPath(rel[-1]).stem)
+            self._notes_by_path[note.path] = note
             for alias in note.aliases:
                 self._alias_index.setdefault(alias.lower(), []).append(note)
 
         self._attachment_parts: dict[Path, tuple[str, ...]] = {
             path: self._relative_parts(path) for path in self._attachments
+        }
+        self._all_parts: dict[Path, tuple[str, ...]] = {
+            **self._note_parts,
+            **self._attachment_parts,
         }
 
     def _relative_parts(self, path: Path) -> tuple[str, ...]:
@@ -78,13 +85,15 @@ class Resolver:
         Return a file's lowercase path components relative to the vault root.
 
         Falls back to the path's own components when the path is not under
-        the vault root.
+        the vault root. Works on the precomputed part tuples (no live
+        ``pathlib`` relative_to calls) — this runs once per file at
+        construction and is on the hot path for large vaults.
         """
-        try:
-            rel = path.relative_to(self._vault_root)
-        except ValueError:
-            rel = path
-        return tuple(part.lower() for part in rel.parts)
+        parts = path.parts
+        root = self._root_parts
+        if len(parts) > len(root) and parts[: len(root)] == root:
+            parts = parts[len(root) :]
+        return tuple(part.lower() for part in parts)
 
     def resolve(self, link: Link, current_note: Note | None = None) -> Path | None:
         """
@@ -150,11 +159,11 @@ class Resolver:
         target = target.partition("#")[0]
         if not target:
             return None
-        all_files = {**self._note_parts, **self._attachment_parts}
+        all_files = self._all_parts
         suffix = PurePosixPath(target).suffix
         if suffix.lower() == _MD_SUFFIX:
             target = target[: -len(_MD_SUFFIX)]
-            all_files = dict(self._note_parts)
+            all_files = self._note_parts
         return self._match_unique(all_files, target)
 
     @staticmethod
@@ -207,7 +216,7 @@ class Resolver:
         path = self._resolve_target(link, current_note)
         if path is None:
             return None
-        return next((note for note in self._notes if note.path == path), None)
+        return self._notes_by_path.get(path)
 
     def shortest_unique_name(self, note: Note) -> str:
         """

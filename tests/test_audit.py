@@ -9,10 +9,13 @@ prompts or mutates. ``should_prompt_on`` is the D1 gate matrix.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
+import hoppus.integrity
 from hoppus.config import default_config
 from hoppus.index.indexer import Index
 from hoppus.integrity import AuditIssue, AuditReport, audit_vault, should_prompt_on
+from hoppus.parse.links import Resolver
 
 
 def make_vault(tmp_path: Path) -> Path:
@@ -135,6 +138,23 @@ def test_audit_vault_clean_and_empty_vaults_report_zero(tmp_path: Path) -> None:
     assert empty_report.count == 0
     assert empty_report.note_count() == 0
     assert empty_report.by_note() == {}
+
+
+def test_audit_vault_builds_resolver_once(tmp_path: Path) -> None:
+    """
+    The resolver is constructed once per audit, not once per note
+    (HOPPUS-70): per-note construction made the audit O(n²).
+    """
+    vault = make_vault(tmp_path)
+    index = Index.build(vault)
+
+    with patch.object(
+        hoppus.integrity, "Resolver", side_effect=Resolver
+    ) as constructor:
+        report = audit_vault(index)
+
+    assert constructor.call_count == 1
+    assert report.count == 3
 
 
 def test_audit_report_is_a_plain_frozen_record() -> None:

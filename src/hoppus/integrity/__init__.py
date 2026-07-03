@@ -129,6 +129,7 @@ def find_unresolved_wikilinks(
     current_note_path: Path,
     *,
     limit_suggestions: int = 5,
+    resolver: Resolver | None = None,
 ) -> list[UnresolvedWikilink]:
     """
     Find the §7.3 hard-rule violations in a note's text, in document
@@ -147,10 +148,16 @@ def find_unresolved_wikilinks(
     :param index: The built vault index to resolve against.
     :param current_note_path: Path of the note containing the links.
     :param limit_suggestions: Maximum number of near-match suggestions.
+    :param resolver: A pre-built resolver over the index's notes and
+        attachments. When None, one is constructed here — pass one in
+        when calling this per note over a whole vault, so the resolver
+        is built once instead of once per note.
     :returns: Unresolved occurrences in document order.
     """
-    notes = list(index.notes_by_path.values())
-    resolver = Resolver(notes, index.vault_root, attachments=index._attachments)
+    notes: list[Note] | None = None
+    if resolver is None:
+        notes = list(index.notes_by_path.values())
+        resolver = Resolver(notes, index.vault_root, attachments=index._attachments)
     current_note = index.notes_by_path.get(current_note_path)
 
     unresolved: list[UnresolvedWikilink] = []
@@ -160,6 +167,8 @@ def find_unresolved_wikilinks(
             continue
         if resolver.resolve(link, current_note) is not None:
             continue
+        if notes is None:
+            notes = list(index.notes_by_path.values())
         ranked = rank(
             link.target,
             notes,
@@ -402,6 +411,7 @@ def audit_note(
     note_path: Path,
     *,
     config: Mapping[str, Any] | None = None,
+    resolver: Resolver | None = None,
 ) -> list[AuditIssue]:
     """
     Collect every report-only link issue in one note's text, in
@@ -438,6 +448,10 @@ def audit_note(
     :param note_path: Path of the note containing the links.
     :param config: The merged configuration mapping (spec §12), or None
         for all checks on.
+    :param resolver: A pre-built resolver over the index's notes and
+        attachments. When None, one is constructed here — pass one in
+        when auditing many notes, so the resolver is built once instead
+        of once per note.
     :returns: The note's issues, in document order.
     """
     toggles = _integrity_toggles(config)
@@ -446,8 +460,12 @@ def audit_note(
     check_attachments = toggles.get("report_missing_attachments", True)
     check_md_links = toggles.get("report_broken_markdown_links", True)
 
-    notes = list(index.notes_by_path.values())
-    resolver = Resolver(notes, index.vault_root, attachments=index._attachments)
+    if resolver is None:
+        resolver = Resolver(
+            list(index.notes_by_path.values()),
+            index.vault_root,
+            attachments=index._attachments,
+        )
     current_note = index.notes_by_path.get(note_path)
     masked = _mask(text)
 
@@ -468,7 +486,9 @@ def audit_note(
         )
 
     if check_wikilinks:
-        for occurrence in find_unresolved_wikilinks(text, index, note_path):
+        for occurrence in find_unresolved_wikilinks(
+            text, index, note_path, resolver=resolver
+        ):
             found.append(
                 (
                     occurrence.start,
@@ -556,13 +576,22 @@ def audit_vault(
         def read_text(path: Path) -> str:
             return path.read_text(encoding="utf-8")
 
+    # Built once for the whole walk: constructing the resolver is O(vault
+    # size), so per-note construction would make the audit O(n²).
+    resolver = Resolver(
+        list(index.notes_by_path.values()),
+        index.vault_root,
+        attachments=index._attachments,
+    )
     issues: list[AuditIssue] = []
     for note_path in sorted(index.notes_by_path):
         try:
             text = read_text(note_path)
         except OSError:
             continue
-        issues.extend(audit_note(text, index, note_path, config=config))
+        issues.extend(
+            audit_note(text, index, note_path, config=config, resolver=resolver)
+        )
     return AuditReport(issues=tuple(issues))
 
 
