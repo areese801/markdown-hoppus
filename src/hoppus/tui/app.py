@@ -13,6 +13,7 @@ config section (see ``hoppus.tui.keymap``).
 
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,12 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import fileops, integrity, related
+from hoppus import fileops, integrity, related, templates
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.index.watcher import VaultWatcher
+from hoppus.naming import validate_note_name
 from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.search.engine import SearchResult
@@ -46,6 +48,8 @@ from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
 from hoppus.tui.modals.search_screen import SearchScreen
+from hoppus.tui.modals.template_picker import TemplatePickerModal
+from hoppus.tui.modals.text_prompt import TextPromptModal
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.panes.explorer import ExplorerPane
@@ -848,8 +852,95 @@ class HoppusApp(App[None]):
         self.query_one("#explorer-pane", ExplorerPane).action_new_note()
 
     def action_new_note_from_template(self) -> None:
-        """New note from template (later story)."""
-        self._not_implemented("New note from template")
+        """
+        Create a new note seeded from a template (spec §9.10,
+        HOPPUS-50).
+
+        Runs as a worker so the picker and title-prompt modals can be
+        awaited via ``push_screen_wait``; the substitution logic lives
+        in :mod:`hoppus.templates` and :meth:`_new_note_from_template_flow`.
+        Notifies (instead of pushing an empty picker) when the vault
+        has no templates.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        if not templates.list_templates(vault_root, self.config):
+            folder = self.config.get("templates", {}).get("folder", "Templates")
+            self.notify(
+                f"No templates found in {folder}/", severity="information", timeout=3
+            )
+            return
+        self.run_worker(self._new_note_from_template_flow(vault_root), exclusive=False)
+
+    async def _pick_template(self, choices: list[Path]) -> Path | None:
+        """
+        Push the template picker and await the user's choice.
+
+        Factored out so headless tests can stub the modal and drive
+        :meth:`_new_note_from_template_flow` with canned choices.
+
+        :param choices: The candidate template files.
+        :returns: The chosen template path, or None on cancel.
+        """
+        return await self.push_screen_wait(TemplatePickerModal(choices))
+
+    async def _prompt_template_title(self) -> str | None:
+        """
+        Push the title prompt for the new note and await the value.
+
+        Validates against the reserved-name rules (spec §5.2) via
+        :func:`hoppus.naming.validate_note_name`.
+
+        :returns: The entered title, or None on cancel.
+        """
+        return await self.push_screen_wait(
+            TextPromptModal(
+                "New note from template — title",
+                placeholder="Note title",
+                validate=validate_note_name,
+            )
+        )
+
+    async def _new_note_from_template_flow(self, vault_root: Path) -> None:
+        """
+        The new-note-from-template flow (spec §9.10, HOPPUS-50).
+
+        Picks a template, prompts for the new note's title, creates
+        ``<title>.md`` at the vault root seeded from the rendered
+        template (the app supplies the real clock — the pure functions
+        in :mod:`hoppus.templates` never call ``datetime.now()``
+        themselves), then suppresses the self-write, reindexes, and
+        opens the new note. Collisions and invalid names notify.
+
+        :param vault_root: The active vault root.
+        """
+        choices = templates.list_templates(vault_root, self.config)
+        if not choices:
+            self.notify("No templates found", severity="information", timeout=3)
+            return
+        template = await self._pick_template(choices)
+        if template is None:
+            return
+        title = await self._prompt_template_title()
+        if title is None or not title.strip():
+            return
+        self._suppress_self_write(vault_root / f"{title.strip()}.md")
+        try:
+            path = templates.new_note_from_template(
+                vault_root,
+                title,
+                template,
+                now=datetime.now(),
+                config=self.config,
+            )
+        except (ValueError, FileExistsError, OSError) as error:
+            self.notify(f"New note from template: {error}", severity="error", timeout=5)
+            return
+        self._index = Index.build(vault_root)
+        self._index_root = vault_root
+        await self.open_note(path, vault_root=vault_root)
 
     def action_quick_capture(self) -> None:
         """Quick capture (later story)."""
