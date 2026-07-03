@@ -30,8 +30,10 @@ from textual.widgets import (
 )
 
 from hoppus.config import load_config
+from hoppus.index.indexer import Index
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
+from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
 
@@ -141,6 +143,9 @@ class HoppusApp(App[None]):
             if vaults_root is not None
             else Path(str(self.config["vaults_root"])).expanduser()
         )
+        # Stashed by the quick switcher's editor path for the future
+        # $EDITOR handoff story (spec §9.6).
+        self._pending_editor_path: Path | None = None
 
     def compose(self) -> ComposeResult:
         """
@@ -345,8 +350,27 @@ class HoppusApp(App[None]):
         self._not_implemented("Help overlay")
 
     def action_quick_switcher(self) -> None:
-        """Quick switcher (later story)."""
-        self._not_implemented("Quick switcher")
+        """
+        Open the quick switcher: fuzzy jump to any note (spec §9.3).
+
+        Enter opens the chosen note in the preview; the editor modifier
+        routes through ``action_open_editor`` (still a stub), stashing
+        the chosen path on ``_pending_editor_path`` for the $EDITOR
+        handoff story.
+        """
+        vault_root = self._active_vault_path()
+        index = Index.build(vault_root)
+
+        async def handle_result(result: SwitcherResult | None) -> None:
+            if result is None:
+                return
+            if result.edit:
+                self._pending_editor_path = result.path
+                self.action_open_editor()
+                return
+            await self.open_note(result.path, vault_root=vault_root)
+
+        self.push_screen(QuickSwitcherModal(index, vault_root), handle_result)
 
     def action_search(self) -> None:
         """In-TUI search (later story)."""
