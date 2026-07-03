@@ -5,8 +5,9 @@ Typer CLI application shared by the three interchangeable console commands
 Fully implemented here: ``vaults`` (list vaults under the Vaults Root) and
 ``audit`` (report-only unresolved-wikilink report, spec §10 / §19 D1,
 HOPPUS-40), plus ``doctor`` (environment health report, spec §7.5,
-HOPPUS-43) and the dispatch/skeleton for every always-available
-subcommand. Subcommands owned by later stories (``find``, ``new``,
+HOPPUS-43), ``find`` (standalone fzf-powered fuzzy search, spec §10 / §3,
+HOPPUS-46), and the dispatch/skeleton for every always-available
+subcommand. Subcommands owned by later stories (``new``,
 ``daily``, ``capture``, ``preview``, ``index``/``reindex``, ``mcp``) and
 the TUI launch are registered as clearly-marked stubs so ``--help`` shows
 the full command tree.
@@ -18,7 +19,8 @@ import typer
 
 from hoppus import __version__
 from hoppus.config import load_config
-from hoppus.environment import run_doctor
+from hoppus.environment import find_binary, run_doctor
+from hoppus.find import run_find
 from hoppus.index.indexer import Index
 from hoppus.integrity import AuditIssue, audit_vault
 from hoppus.vault import Vault, discover_vaults
@@ -203,9 +205,45 @@ def find(
     query: str = typer.Argument(None, help="Initial fuzzy-search query."),
 ) -> None:
     """
-    Standalone fzf-powered fuzzy search (spec §10).
+    Standalone fzf-powered fuzzy search over the default vault's notes
+    (spec §10, §3, HOPPUS-46).
+
+    Pipes the vault's notes through the real ``fzf`` binary (with a
+    ``bat``/``cat`` preview) and prints the selected note's absolute
+    path. This is the one fzf-dependent subcommand; it errors clearly
+    when ``fzf`` is absent. Cancelling in fzf exits 0 and prints
+    nothing.
     """
-    _stub("find")
+    config = load_config()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    fzf_path = find_binary("fzf")
+    if fzf_path is None:
+        typer.secho(
+            "hop find requires the 'fzf' binary, which was not found on "
+            "PATH. Install fzf, or use the in-TUI search (press / in the "
+            "TUI).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    index = Index.build(selected.path)
+    selection = run_find(
+        index, query, fzf_path=fzf_path, preview_path=find_binary("bat")
+    )
+    if selection is not None:
+        typer.echo(str(selection))
 
 
 def _format_issue(issue: AuditIssue) -> str:

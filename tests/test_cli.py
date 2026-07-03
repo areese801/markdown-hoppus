@@ -159,7 +159,6 @@ def test_open_unknown_vault_exits_nonzero(vaults_root: Path) -> None:
         ["daily"],
         ["capture"],
         ["preview"],
-        ["find"],
     ],
 )
 def test_stubbed_subcommands_exit_zero(args: list[str]) -> None:
