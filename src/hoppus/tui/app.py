@@ -31,7 +31,7 @@ from textual.widgets import (
     Tabs,
 )
 
-from hoppus import integrity
+from hoppus import fileops, integrity, related
 from hoppus.config import load_config
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
@@ -42,6 +42,7 @@ from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
+from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.panes.explorer import ExplorerPane
@@ -655,8 +656,98 @@ class HoppusApp(App[None]):
         self._not_implemented("Open in browser")
 
     def action_link_note(self) -> None:
-        """Link this note to… (later story)."""
-        self._not_implemented("Link to…")
+        """
+        Open the ``## Related`` link picker (spec §7.2, HOPPUS-41).
+
+        Runs as a worker so the picker modal can be awaited via
+        ``push_screen_wait``; the append/dedupe/bootstrap logic lives
+        in :mod:`hoppus.related` and :meth:`_link_note_flow`.
+        """
+        if self.preview.note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        self.run_worker(self._link_note_flow(), exclusive=False)
+
+    async def _pick_related_target(
+        self, index: Index, vault_root: Path
+    ) -> RelatedChoice | None:
+        """
+        Push the related picker and await the user's choice.
+
+        Factored out so headless tests can stub the modal and drive
+        :meth:`_link_note_flow` with canned choices.
+
+        :param index: The active vault index.
+        :param vault_root: The active vault root.
+        :returns: The choice, or None on cancel.
+        """
+        return await self.push_screen_wait(RelatedPickerModal(index, vault_root))
+
+    async def _link_note_flow(self) -> None:
+        """
+        The ``## Related`` authoring flow (spec §7.2, HOPPUS-41).
+
+        Picks a target via the modal, bootstraps ``<name>.md`` at the
+        vault root for a new name (so the section never gains a
+        dangling link), appends ``- [[Target]]`` under the configured
+        heading via :func:`hoppus.related.add_related_link`, and — when
+        the text actually changed — suppresses the self-write,
+        rewrites the note, reindexes, and refreshes the preview. A
+        dedupe hit notifies and skips the write.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        path = Path(note_path)
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir() or not path.is_file():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        choice = await self._pick_related_target(
+            self._active_index(vault_root), vault_root
+        )
+        if choice is None:
+            return
+        heading = str(
+            self.config.get("link_integrity", {}).get("related_heading", "## Related")
+        )
+        created: Path | None = None
+        if choice.new_name is not None:
+            target = choice.new_name.strip()
+            try:
+                self._suppress_self_write(vault_root / f"{target}.md")
+                created = fileops.create_note(vault_root, target)
+            except FileExistsError:
+                # The note appeared since the picker was built; linking
+                # to it is still safe, so just proceed.
+                pass
+            except ValueError as error:
+                self.notify(f"Link to…: {error}", severity="error", timeout=5)
+                return
+        elif choice.note is not None:
+            target = choice.note.title
+        else:
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+            new_text = related.add_related_link(text, target, heading=heading)
+            if new_text == text:
+                self.notify(
+                    f"Already linked: {target}", severity="information", timeout=3
+                )
+            else:
+                self._suppress_self_write(path)
+                path.write_text(new_text, encoding="utf-8")
+        except OSError as error:
+            self.notify(f"Link to…: {error}", severity="error", timeout=5)
+            return
+        if created is not None or new_text != text:
+            self._index = Index.build(vault_root)
+            self._index_root = vault_root
+            await self.open_note(path, vault_root=vault_root)
+        if new_text != text:
+            self.notify(f"Linked to {target}", severity="information", timeout=3)
 
     def action_toggle_graph(self) -> None:
         """Graph view (later story)."""
