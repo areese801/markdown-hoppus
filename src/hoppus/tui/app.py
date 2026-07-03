@@ -4,8 +4,9 @@ The Textual App: three-region layout, keymap, and status line (spec §9.1).
 Regions: a tabbed left sidebar (Explorer · Tags · Bookmarks), a main pane
 hosting the note preview (spec §9.5), and a toggleable right sidebar
 (Backlinks). A header/status line shows the current vault name, active
-note title, and word count; a footer shows key hints. Sidebar content is
-placeholder-only — real panes arrive in later stories. The keymap
+note title, and word count; a footer shows key hints. The Explorer tab
+hosts the File Explorer tree (spec §9.2); the remaining sidebar tabs are
+placeholders until their stories land. The keymap
 defaults come from spec §9.16 and are remappable via the ``keymap``
 config section (see ``hoppus.tui.keymap``).
 """
@@ -18,11 +19,20 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Markdown, Static, TabbedContent, TabPane, Tabs
+from textual.widgets import (
+    DirectoryTree,
+    Footer,
+    Markdown,
+    Static,
+    TabbedContent,
+    TabPane,
+    Tabs,
+)
 
 from hoppus.config import load_config
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
+from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
 
 
@@ -140,7 +150,7 @@ class HoppusApp(App[None]):
         with Horizontal(id="body"):
             with TabbedContent(id="left-sidebar"):
                 with TabPane("Explorer", id="tab-explorer"):
-                    yield PanePlaceholder("File Explorer", id="explorer-placeholder")
+                    yield ExplorerPane(self._active_vault_path(), id="explorer-pane")
                 with TabPane("Tags", id="tab-tags"):
                     yield PanePlaceholder("Tag pane", id="tags-placeholder")
                 with TabPane("Bookmarks", id="tab-bookmarks"):
@@ -160,6 +170,43 @@ class HoppusApp(App[None]):
         self.set_keymap(resolve_keymap_overrides(self.config))
         self.vault_name = self.config.get("default_vault")
         self._refresh_status_line()
+
+    # -- File Explorer -------------------------------------------------------
+
+    def _active_vault_path(self) -> Path:
+        """
+        Resolve the active vault directory for the File Explorer root.
+
+        Uses ``vaults_root / vault_name`` when a vault name is known
+        (the reactive, or the configured default before mount) and that
+        directory exists; otherwise falls back to the Vaults Root itself
+        so the pane still renders when no default vault is set.
+        """
+        name = self.vault_name or self.config.get("default_vault")
+        if name:
+            candidate = self.vaults_root / str(name)
+            if candidate.is_dir():
+                return candidate
+        return self.vaults_root
+
+    async def on_directory_tree_file_selected(
+        self, event: DirectoryTree.FileSelected
+    ) -> None:
+        """
+        Open a ``.md`` file chosen in the File Explorer (spec §9.2).
+
+        Attachments (non-``.md`` files) produce a gentle notification;
+        opening them in a system app is a later story.
+        """
+        event.stop()
+        path = Path(event.path)
+        if not path.is_file():
+            return
+        if path.suffix.lower() != ".md":
+            self.notify(f"Not a note: {path.name}", severity="information", timeout=3)
+            return
+        explorer = self.query_one("#explorer-pane", ExplorerPane)
+        await self.open_note(path, vault_root=Path(explorer.path))
 
     # -- Status line -------------------------------------------------------
 
