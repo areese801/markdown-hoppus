@@ -10,8 +10,9 @@ HOPPUS-46), ``daily`` (open/create today's daily note, spec §9.9,
 HOPPUS-49), ``capture`` (quick-capture to the inbox, spec §9.11,
 HOPPUS-51), and the dispatch/skeleton for every always-available
 subcommand. ``preview --browser`` renders locally to the browser (spec
-§9.5, HOPPUS-56). Subcommands owned by later stories (``new``,
-``preview`` without ``--browser``, ``index``/``reindex``, ``mcp``) and
+§9.5, HOPPUS-56). ``mcp`` launches the bundled MCP server over stdio
+(spec §11, HOPPUS-58). Subcommands owned by later stories (``new``,
+``preview`` without ``--browser``, ``index``/``reindex``) and
 the TUI launch are registered as clearly-marked stubs so ``--help`` shows
 the full command tree.
 """
@@ -29,6 +30,7 @@ from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
 from hoppus.integrity import AuditIssue, audit_vault
+from hoppus.mcp import server as mcp_server
 from hoppus.render.browser import (
     go_grip_available,
     launch_go_grip,
@@ -166,9 +168,11 @@ def reindex() -> None:
 @app.command()
 def mcp() -> None:
     """
-    Run the bundled MCP server (spec §11).
+    Run the bundled MCP server over stdio (spec §11, HOPPUS-58).
+
+    Blocks serving MCP clients until the client disconnects.
     """
-    _stub("mcp")
+    mcp_server.run(load_config())
 
 
 @app.command()
