@@ -97,6 +97,22 @@ class PreviewPane(VerticalScroll):
             app.note_title = note.title
             app.word_count = note.word_count
 
+    async def clear(self) -> None:
+        """
+        Reset the pane to the empty (no note) state.
+
+        Clears the active note path and text, leaves raw mode off, empties
+        both the Markdown and raw views, and shows the (empty) rendered view.
+        """
+        self.note_path = None
+        self.raw_mode = False
+        self._text = ""
+        await self.query_one("#preview-markdown", Markdown).update("")
+        static = self.query_one("#preview-raw", Static)
+        static.update("")
+        self.query_one("#preview-markdown", Markdown).display = True
+        static.display = False
+
     async def toggle_raw(self) -> None:
         """
         Switch between the rendered view and the raw Syntax view.

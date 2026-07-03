@@ -35,8 +35,10 @@ from hoppus.render.ofm_markdown import decode_href
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
+from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
+from hoppus.vault import discover_vaults
 
 
 class PanePlaceholder(Static):
@@ -434,6 +436,60 @@ class HoppusApp(App[None]):
         """Reindex vault (later story)."""
         self._not_implemented("Reindex")
 
+    # -- Vault switching -------------------------------------------------------
+
     def action_vault_switcher(self) -> None:
-        """Vault switcher (later story)."""
-        self._not_implemented("Vault switcher")
+        """
+        Open the vault switcher: pick the active vault (spec §9.15).
+
+        Discovers vaults under the Vaults Root and pushes the modal; the
+        chosen name (if any) routes through :meth:`switch_vault`.
+        """
+        try:
+            vaults = discover_vaults(self.vaults_root)
+        except (FileNotFoundError, NotADirectoryError):
+            vaults = []
+        if not vaults:
+            self.notify(
+                f"No vaults found under {self.vaults_root}",
+                severity="information",
+                timeout=3,
+            )
+            return
+
+        async def handle_result(name: str | None) -> None:
+            if name is None:
+                return
+            await self.switch_vault(name)
+
+        names = [vault.name for vault in vaults]
+        self.push_screen(
+            VaultSwitcherModal(names, current=self.vault_name), handle_result
+        )
+
+    async def switch_vault(self, name: str) -> None:
+        """
+        Make the named vault active and refresh every pane (spec §9.15).
+
+        Updates the status line via the ``vault_name`` reactive, re-roots
+        the File Explorer tree, and resets the preview — dropping its
+        cached index so link resolution lazily re-indexes the new vault.
+
+        Args:
+            name: Name of a vault under the Vaults Root.
+        """
+        vault_path = self.vaults_root / name
+        if not vault_path.is_dir():
+            self.notify(f"Vault not found: {name}", severity="warning", timeout=3)
+            return
+        self.vault_name = name
+
+        explorer = self.query_one("#explorer-pane", ExplorerPane)
+        explorer.path = vault_path
+        await explorer.reload()
+
+        preview = self.preview
+        await preview.clear()
+        preview.vault_root = vault_path
+        self.note_title = None
+        self.word_count = None
