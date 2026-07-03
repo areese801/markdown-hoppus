@@ -1,11 +1,12 @@
 """
-Thin MCP server wrapper exposing the read tools over stdio (spec §11,
-HOPPUS-58).
+Thin MCP server wrapper exposing the read and write tools over stdio
+(spec §11, HOPPUS-58/HOPPUS-59).
 
 All tool logic lives in the pure, unit-testable :mod:`hoppus.mcp.tools`
-module; this wrapper only registers one MCP tool per read function and
-runs the FastMCP stdio transport. Write tools (HOPPUS-59) and the
-``mcp.read_only`` flag (HOPPUS-60) are handled by later stories.
+module; this wrapper only registers one MCP tool per function and runs
+the FastMCP stdio transport. Write tools are registered by the separate
+:func:`_register_write_tools` helper so the ``mcp.read_only`` flag
+(HOPPUS-60) can skip them without touching the read tools.
 """
 
 from typing import Any
@@ -111,7 +112,107 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         """
         return tools.audit_vault(cfg, vault=vault)
 
+    _register_write_tools(server, cfg)
     return server
+
+
+def _register_write_tools(server: FastMCP, cfg: dict[str, Any]) -> None:
+    """
+    Register the five write tools (spec §11, HOPPUS-59) on a server.
+
+    Kept separate from :func:`build_server`'s read tools so the
+    ``mcp.read_only`` flag (HOPPUS-60) can skip this call to run the
+    server read-only.
+
+    :param server: The FastMCP server to register the tools on.
+    :param cfg: The merged configuration mapping (spec §12).
+    """
+
+    @server.tool()
+    def create_note(
+        name: str,
+        content: str = "",
+        vault: str | None = None,
+        on_unresolved: str = "reject",
+    ) -> dict[str, Any]:
+        """
+        Create a new note at the vault root. Unresolved ``[[wikilinks]]``
+        in the content are gated by ``on_unresolved``: ``"reject"``
+        (default) writes nothing and returns ``status="rejected"`` with
+        the dangling targets plus near-match suggestions to retry with;
+        ``"create"`` bootstraps each missing target as an empty note at
+        the vault root, then writes. Collisions and invalid names return
+        ``status="error"``.
+        """
+        return tools.create_note(
+            cfg, name, content, vault=vault, on_unresolved=on_unresolved
+        )
+
+    @server.tool()
+    def update_note(
+        note: str,
+        content: str,
+        vault: str | None = None,
+        on_unresolved: str = "reject",
+    ) -> dict[str, Any]:
+        """
+        Replace an existing note's entire file content (frontmatter
+        included — fetch it via ``get_note`` first if it must be kept).
+        Unresolved ``[[wikilinks]]`` in the new content are gated by
+        ``on_unresolved``: ``"reject"`` (default) writes nothing and
+        returns the dangling targets plus suggestions; ``"create"``
+        bootstraps the missing targets at the vault root, then writes.
+        """
+        return tools.update_note(
+            cfg, note, content, vault=vault, on_unresolved=on_unresolved
+        )
+
+    @server.tool()
+    def append_to_note(
+        note: str,
+        text: str,
+        vault: str | None = None,
+        on_unresolved: str = "reject",
+        heading: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Append text to an existing note — at end-of-file, or at the end
+        of the given ``heading`` section (a missing heading is added at
+        end-of-file). Unresolved ``[[wikilinks]]`` in the appended text
+        are gated by ``on_unresolved``: ``"reject"`` (default) writes
+        nothing and returns the dangling targets plus suggestions;
+        ``"create"`` bootstraps the missing targets at the vault root,
+        then appends.
+        """
+        return tools.append_to_note(
+            cfg,
+            note,
+            text,
+            vault=vault,
+            on_unresolved=on_unresolved,
+            heading=heading,
+        )
+
+    @server.tool()
+    def rename_note(
+        note: str, new_name: str, vault: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Rename a note, rewriting every inbound link across the vault
+        (same propagation as the TUI). Returns the old/new paths and
+        the number of links updated; collisions and invalid names
+        return ``status="error"``.
+        """
+        return tools.rename_note(cfg, note, new_name, vault=vault)
+
+    @server.tool()
+    def delete_note(note: str, vault: str | None = None) -> dict[str, Any]:
+        """
+        Delete a note file (folders delete recursively). The protected
+        ``.hoppus``/``.obsidian`` state directories are never touched —
+        such attempts return ``status="error"``.
+        """
+        return tools.delete_note(cfg, note, vault=vault)
 
 
 def run(config: dict[str, Any] | None = None) -> None:

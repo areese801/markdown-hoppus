@@ -23,6 +23,14 @@ EXPECTED_READ_TOOLS = {
     "audit_vault",
 }
 
+EXPECTED_WRITE_TOOLS = {
+    "create_note",
+    "update_note",
+    "append_to_note",
+    "rename_note",
+    "delete_note",
+}
+
 
 def _config() -> dict[str, Any]:
     """
@@ -33,11 +41,12 @@ def _config() -> dict[str, Any]:
 
 def test_build_server_registers_all_read_tools() -> None:
     """
-    ``build_server`` exposes exactly the nine spec-§11 read tools.
+    ``build_server`` exposes exactly the spec-§11 read and write tools
+    (write tools added by HOPPUS-59).
     """
     server = build_server(_config())
     tools = asyncio.run(server.list_tools())
-    assert {tool.name for tool in tools} == EXPECTED_READ_TOOLS
+    assert {tool.name for tool in tools} == EXPECTED_READ_TOOLS | EXPECTED_WRITE_TOOLS
 
 
 def test_registered_tools_have_descriptions() -> None:
