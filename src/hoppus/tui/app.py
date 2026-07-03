@@ -104,6 +104,7 @@ class StatusLine(Static):
         word_count: int | None,
         problems: int | None = None,
         char_count: int | None = None,
+        index_error: str | None = None,
     ) -> None:
         """
         Re-render the status line from the app's reactive state.
@@ -118,6 +119,9 @@ class StatusLine(Static):
             char_count: Active note character count (spec §9.13); the
                 chars segment appears only when this is not None, so
                 the string is unchanged for None.
+            index_error: Last index-build failure message (HOPPUS-69);
+                the ⚠ index error segment appears only when this is
+                set, so the string is unchanged for None.
         """
         vault = vault_name or "(no vault)"
         title = note_title or "(no note)"
@@ -127,6 +131,8 @@ class StatusLine(Static):
             status += f" · {char_count} chars"
         if problems:
             status += f" · ⚠ {problems} problems"
+        if index_error:
+            status += " · ⚠ index error"
         self.update(status)
 
 
@@ -216,6 +222,11 @@ class HoppusApp(App[None]):
         # HOPPUS-33's unlinked mentions will reuse it.
         self._index: Index | None = None
         self._index_root: Path | None = None
+        # Last index-build failure message (HOPPUS-69). Set whenever a
+        # build raises so the status line and index-dependent actions
+        # can surface the error instead of degrading silently; cleared
+        # on the next successful build.
+        self._index_error: str | None = None
         # Report-only integrity issue count for the status-line
         # "problems" indicator (spec §19 D1, HOPPUS-40).
         self._problem_count: int = 0
@@ -307,6 +318,7 @@ class HoppusApp(App[None]):
             self.word_count,
             problems=self._problem_count,
             char_count=self.char_count,
+            index_error=self._index_error,
         )
 
     def _refresh_problems(self) -> None:
@@ -330,10 +342,56 @@ class HoppusApp(App[None]):
                 else:
                     index = Index.build(vault_root)
                 count = integrity.audit_vault(index).count
-        except Exception:
+                self._index_error = None
+        except Exception as error:
             count = 0
+            self._report_index_error(error)
         self._problem_count = count
         self._refresh_status_line()
+
+    def _report_index_error(self, error: Exception) -> None:
+        """
+        Surface an index-build failure to the user (HOPPUS-69).
+
+        Records the message for the status line's ⚠ index error
+        segment, logs the exception, and posts an error toast — the
+        index must never fail silently and leave the TUI looking
+        healthy while functionally dead.
+
+        Args:
+            error: The exception raised while building the index.
+        """
+        self._index_error = str(error) or type(error).__name__
+        self.log.error(f"Index build failed: {error!r}")
+        self.notify(
+            f"Index build failed: {self._index_error}", severity="error", timeout=10
+        )
+        self._refresh_status_line()
+
+    def _build_index(self, vault_root: Path) -> Index | None:
+        """
+        Build (and cache) the vault index, surfacing any failure.
+
+        On success the cache and root are updated and any prior index
+        error is cleared; on failure the cache is invalidated, the
+        error is reported via :meth:`_report_index_error`, and None is
+        returned so callers can bail out with the user already told
+        why (HOPPUS-69).
+
+        Args:
+            vault_root: The vault root to index.
+        """
+        try:
+            index = Index.build(vault_root)
+        except Exception as error:
+            self._index = None
+            self._index_root = None
+            self._report_index_error(error)
+            return None
+        self._index = index
+        self._index_root = vault_root
+        self._index_error = None
+        return index
 
     def watch_vault_name(self) -> None:
         """React to vault changes."""
@@ -377,9 +435,11 @@ class HoppusApp(App[None]):
             self.char_count = None
         root = vault_root if vault_root is not None else preview.vault_root
         if root is not None and root.is_dir():
-            self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
-                path, self._active_index(root), root
-            )
+            index = self._active_index(root)
+            if index is not None:
+                self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
+                    path, index, root
+                )
         self._refresh_problems()
         # D1 gate: opening a note is a report-only trigger by default —
         # the indicator above is the only surface. Only the escape hatch
@@ -387,20 +447,21 @@ class HoppusApp(App[None]):
         if integrity.should_prompt_on(self.config, "open"):
             self.run_worker(self._run_integrity_pass(path), exclusive=False)
 
-    def _active_index(self, vault_root: Path) -> Index:
+    def _active_index(self, vault_root: Path) -> Index | None:
         """
         Return the cached index for the active vault, building it once.
 
         Rebuilds when ``vault_root`` differs from the cached root;
-        :meth:`switch_vault` invalidates the cache on vault change.
+        :meth:`switch_vault` invalidates the cache on vault change. A
+        failed build returns None with the error already surfaced to
+        the user (HOPPUS-69), so callers should simply bail out.
 
         Args:
             vault_root: The vault root to index.
         """
-        if self._index is None or self._index_root != vault_root:
-            self._index = Index.build(vault_root)
-            self._index_root = vault_root
-        return self._index
+        if self._index is not None and self._index_root == vault_root:
+            return self._index
+        return self._build_index(vault_root)
 
     def action_unlinked_mentions(self) -> None:
         """
@@ -421,6 +482,8 @@ class HoppusApp(App[None]):
             self.notify("No open vault", severity="information", timeout=3)
             return
         index = self._active_index(vault_root)
+        if index is None:
+            return
         note = index.notes_by_path.get(Path(note_path))
         if note is None:
             self.notify(
@@ -558,7 +621,9 @@ class HoppusApp(App[None]):
         handoff story.
         """
         vault_root = self._active_vault_path()
-        index = Index.build(vault_root)
+        index = self._build_index(vault_root)
+        if index is None:
+            return
 
         async def handle_result(result: SwitcherResult | None) -> None:
             if result is None:
@@ -580,6 +645,8 @@ class HoppusApp(App[None]):
         """
         vault_root = self._active_vault_path()
         index = self._active_index(vault_root)
+        if index is None:
+            return
         backend = str(self.config.get("search", {}).get("content_backend", "auto"))
 
         async def handle_result(result: SearchResult | None) -> None:
@@ -630,8 +697,8 @@ class HoppusApp(App[None]):
         await self._run_integrity_pass(path)
         vault_root = self._active_vault_path()
         if vault_root.is_dir():
-            self._index = Index.build(vault_root)
-            self._index_root = vault_root
+            if self._build_index(vault_root) is None:
+                return
             await self.open_note(path, vault_root=vault_root)
 
     async def _prompt_unresolved(
@@ -673,9 +740,9 @@ class HoppusApp(App[None]):
         if not vault_root.is_dir() or not path.is_file():
             return
         text = path.read_text(encoding="utf-8")
-        index = Index.build(vault_root)
-        self._index = index
-        self._index_root = vault_root
+        index = self._build_index(vault_root)
+        if index is None:
+            return
         unresolved = integrity.find_unresolved_wikilinks(text, index, path)
         if not unresolved:
             return
@@ -702,8 +769,7 @@ class HoppusApp(App[None]):
         if created:
             self._suppress_self_write(*created)
         if created or new_text != text:
-            self._index = Index.build(vault_root)
-            self._index_root = vault_root
+            self._build_index(vault_root)
 
     def action_open_system(self) -> None:
         """
@@ -799,9 +865,10 @@ class HoppusApp(App[None]):
         if not vault_root.is_dir() or not path.is_file():
             self.notify("No open vault", severity="information", timeout=3)
             return
-        choice = await self._pick_related_target(
-            self._active_index(vault_root), vault_root
-        )
+        index = self._active_index(vault_root)
+        if index is None:
+            return
+        choice = await self._pick_related_target(index, vault_root)
         if choice is None:
             return
         heading = str(
@@ -838,8 +905,7 @@ class HoppusApp(App[None]):
             self.notify(f"Link to…: {error}", severity="error", timeout=5)
             return
         if created is not None or new_text != text:
-            self._index = Index.build(vault_root)
-            self._index_root = vault_root
+            self._build_index(vault_root)
             await self.open_note(path, vault_root=vault_root)
         if new_text != text:
             self.notify(f"Linked to {target}", severity="information", timeout=3)
@@ -866,6 +932,8 @@ class HoppusApp(App[None]):
             return
         graph_config = self.config.get("graph", {})
         index = self._active_index(vault_root)
+        if index is None:
+            return
 
         async def handle_result(path: Path | None) -> None:
             if path is None:
@@ -934,8 +1002,7 @@ class HoppusApp(App[None]):
             return
         if created:
             self._suppress_self_write(path)
-            self._index = Index.build(vault_root)
-            self._index_root = vault_root
+            self._build_index(vault_root)
         self.notify(
             f"Daily note {'created' if created else 'opened'}: {path.name}",
             severity="information",
@@ -1039,8 +1106,7 @@ class HoppusApp(App[None]):
         except (ValueError, FileExistsError, OSError) as error:
             self.notify(f"New note from template: {error}", severity="error", timeout=5)
             return
-        self._index = Index.build(vault_root)
-        self._index_root = vault_root
+        self._build_index(vault_root)
         await self.open_note(path, vault_root=vault_root)
 
     def action_quick_capture(self) -> None:
@@ -1101,8 +1167,7 @@ class HoppusApp(App[None]):
             self.notify(f"Quick capture: {error}", severity="error", timeout=5)
             return
         self._suppress_self_write(path)
-        self._index = Index.build(vault_root)
-        self._index_root = vault_root
+        self._build_index(vault_root)
         self.notify(f"Captured: {path.name}", severity="information", timeout=3)
         await self.open_note(path, vault_root=vault_root)
 
@@ -1194,6 +1259,8 @@ class HoppusApp(App[None]):
                     content = clipboard.yank_path(path)
                 else:
                     index = self._active_index(vault_root)
+                    if index is None:
+                        return
                     note = index.notes_by_path.get(path)
                     if note is None:
                         self.notify(
@@ -1228,12 +1295,13 @@ class HoppusApp(App[None]):
         if not vault_root.is_dir():
             self.notify("Reindex: no open vault", severity="information", timeout=3)
             return
-        self._index = Index.build(vault_root)
-        self._index_root = vault_root
+        index = self._build_index(vault_root)
+        if index is None:
+            return
         note_path = self.preview.note_path
         if note_path is not None:
             self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
-                Path(note_path), self._index, vault_root
+                Path(note_path), index, vault_root
             )
         self._refresh_problems()
         self.notify("Reindexed", severity="information", timeout=3)
@@ -1251,8 +1319,10 @@ class HoppusApp(App[None]):
         if not vault_root.is_dir():
             self.notify("Vault stats: no open vault", severity="information", timeout=3)
             return
+        index = self._active_index(vault_root)
+        if index is None:
+            return
         try:
-            index = self._active_index(vault_root)
             vault_stats = stats.compute_vault_stats(index, config=self.config)
         except Exception as error:
             self.notify(f"Vault stats failed: {error}", severity="error", timeout=5)
