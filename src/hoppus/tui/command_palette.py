@@ -124,6 +124,11 @@ HOPPUS_COMMANDS: tuple[HoppusCommand, ...] = (
         help="Show the local graph around the active note",
     ),
     HoppusCommand(
+        title="Vault stats",
+        action="vault_stats",
+        help="Show statistics for the active vault",
+    ),
+    HoppusCommand(
         title="Help",
         action="help",
         help="Show the help and keymap overlay",

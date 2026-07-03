@@ -35,7 +35,7 @@ def test_registry_specs_are_well_formed() -> None:
     """
     Every registry entry is a HoppusCommand naming an existing app action.
     """
-    assert len(HOPPUS_COMMANDS) == 20
+    assert len(HOPPUS_COMMANDS) == 21
     titles = [spec.title for spec in HOPPUS_COMMANDS]
     assert len(set(titles)) == len(titles)
     for spec in HOPPUS_COMMANDS:

@@ -14,6 +14,7 @@ config section (see ``hoppus.tui.keymap``).
 
 import os
 import subprocess
+import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -230,10 +231,10 @@ class HoppusApp(App[None]):
         # Report-only integrity issue count for the status-line
         # "problems" indicator (spec §19 D1, HOPPUS-40).
         self._problem_count: int = 0
-        # Live watcher slot (spec §8/D5, HOPPUS-38). The app does not
-        # auto-start a watcher yet (HOPPUS-37 kept live watching off in
-        # headless tests); when one is enabled, self-writes route through
-        # _suppress_self_write so they never re-trigger the index pass.
+        # Live watcher slot (spec §6.2/§8/D5, HOPPUS-77). Auto-started
+        # on mount (and on vault switch) unless watcher.enabled is
+        # false; self-writes route through _suppress_self_write so they
+        # never re-trigger the index pass.
         self._watcher: VaultWatcher | None = None
 
     def compose(self) -> ComposeResult:
@@ -264,6 +265,13 @@ class HoppusApp(App[None]):
         self._refresh_problems()
         self._refresh_status_line()
         self._refresh_bookmarks()
+        self._start_watcher()
+
+    def on_unmount(self) -> None:
+        """
+        Stop the live vault watcher when the app shuts down.
+        """
+        self._stop_watcher()
 
     # -- File Explorer -------------------------------------------------------
 
@@ -578,6 +586,75 @@ class HoppusApp(App[None]):
         Switch the left sidebar to the Tags tab (spec §9.16 ``t``).
         """
         self.query_one("#left-sidebar", TabbedContent).active = "tab-tags"
+
+    # -- Live vault watching (spec §6.2/§8, D5; HOPPUS-77) ---------------------
+
+    def _start_watcher(self) -> None:
+        """
+        Construct and start a live vault watcher (spec §6.2, HOPPUS-77).
+
+        Watches the active vault root and routes change events through
+        :meth:`_on_watcher_change` into the existing reindex path.
+        Skipped entirely when ``watcher.enabled`` is false (the opt-out)
+        or when no vault directory exists. Degrades gracefully: a failed
+        index build or an observer that cannot start (missing watchdog,
+        inotify limits, network filesystems) leaves live watching off
+        with a quiet notification — never a crash — and the ``r``
+        keybind remains the manual fallback (spec §8).
+        """
+        if not self.config.get("watcher", {}).get("enabled", True):
+            return
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            return
+        try:
+            index = Index.build(vault_root)
+        except Exception as error:
+            # The reindex path surfaces build failures on demand; live
+            # watching simply stays off rather than crashing on mount.
+            self.log.error(f"Watcher index build failed: {error!r}")
+            return
+        watcher = VaultWatcher(index, on_change=self._on_watcher_change)
+        watcher.start()
+        if not watcher.available:
+            self.notify(
+                "Live vault watching unavailable — press r to reindex",
+                severity="information",
+                timeout=5,
+            )
+            return
+        self._watcher = watcher
+
+    def _stop_watcher(self) -> None:
+        """
+        Stop and drop the live vault watcher, if any (idempotent).
+        """
+        watcher, self._watcher = self._watcher, None
+        if watcher is not None:
+            watcher.stop()
+
+    def _on_watcher_change(self, path: Path) -> None:
+        """
+        Route a live watcher event into the existing reindex path.
+
+        The watcher already filtered, debounced, and D5-suppressed the
+        event, so this simply rebuilds via :meth:`action_reindex`.
+        Called from the observer thread in live use (hopping onto the
+        app thread via ``call_from_thread``); tests drive it directly on
+        the app thread, where the hop must be skipped.
+
+        :param path: The changed file (unused — the reindex is whole-
+            vault).
+        """
+        del path
+        if self._thread_id == threading.get_ident():
+            self.action_reindex()
+            return
+        try:
+            self.call_from_thread(self.action_reindex)
+        except RuntimeError:
+            # The app is shutting down; the event no longer matters.
+            self.log.error("Dropped a watcher event during shutdown")
 
     # -- Not-yet-implemented actions -----------------------------------------
 
@@ -1284,12 +1361,11 @@ class HoppusApp(App[None]):
         Rebuild the active vault's index (spec §9.16 ``r``, HOPPUS-37).
 
         This is the manual fallback of spec §8's graceful degradation:
-        live watching via ``hoppus.index.watcher.VaultWatcher`` is
-        deliberately NOT auto-started by the app in this story (a
-        background observer thread risks flakiness in headless tests);
-        the ``r`` keybind rebuilds on demand instead. Invalidates the
-        cached index, rebuilds it, and refreshes the open note's
-        backlinks pane.
+        when the live watcher (auto-started on mount, HOPPUS-77) is
+        unavailable, the ``r`` keybind rebuilds on demand; the watcher
+        itself routes change events here too. Invalidates the cached
+        index, rebuilds it, and refreshes the open note's backlinks
+        pane.
         """
         vault_root = self._active_vault_path()
         if not vault_root.is_dir():
@@ -1367,6 +1443,8 @@ class HoppusApp(App[None]):
         Updates the status line via the ``vault_name`` reactive, re-roots
         the File Explorer tree, and resets the preview — dropping its
         cached index so link resolution lazily re-indexes the new vault.
+        The live watcher is stopped and restarted against the new root
+        (HOPPUS-77).
 
         Args:
             name: Name of a vault under the Vaults Root.
@@ -1375,6 +1453,7 @@ class HoppusApp(App[None]):
         if not vault_path.is_dir():
             self.notify(f"Vault not found: {name}", severity="warning", timeout=3)
             return
+        self._stop_watcher()
         self.vault_name = name
 
         explorer = self.query_one("#explorer-pane", ExplorerPane)
@@ -1392,3 +1471,4 @@ class HoppusApp(App[None]):
         self.char_count = None
         self._refresh_problems()
         self._refresh_bookmarks()
+        self._start_watcher()

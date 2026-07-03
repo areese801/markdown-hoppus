@@ -80,6 +80,9 @@ def default_config() -> dict[str, Any]:
                 "prompt_before_link_update": True,
                 "attachments_folder": "attachments",
             },
+            "watcher": {
+                "enabled": True,
+            },
             "keymap": {},
             "mcp": {
                 "read_only": False,
