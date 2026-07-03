@@ -153,7 +153,6 @@ def test_open_unknown_vault_exits_nonzero(vaults_root: Path) -> None:
     "args",
     [
         ["doctor"],
-        ["audit"],
         ["index"],
         ["reindex"],
         ["mcp"],

@@ -73,7 +73,11 @@ class StatusLine(Static):
     """
 
     def update_status(
-        self, vault_name: str | None, note_title: str | None, word_count: int | None
+        self,
+        vault_name: str | None,
+        note_title: str | None,
+        word_count: int | None,
+        problems: int | None = None,
     ) -> None:
         """
         Re-render the status line from the app's reactive state.
@@ -82,11 +86,17 @@ class StatusLine(Static):
             vault_name: Active vault name, or None when no vault is open.
             note_title: Active note title, or None when no note is open.
             word_count: Active note word count, or None when unknown.
+            problems: Report-only integrity issue count (spec §19 D1);
+                the ⚠ segment appears only when this is > 0, so the
+                string is unchanged for None/0.
         """
         vault = vault_name or "(no vault)"
         title = note_title or "(no note)"
         words = "– words" if word_count is None else f"{word_count} words"
-        self.update(f" hoppus · {vault} · {title} · {words}")
+        status = f" hoppus · {vault} · {title} · {words}"
+        if problems:
+            status += f" · ⚠ {problems} problems"
+        self.update(status)
 
 
 class HoppusApp(App[None]):
@@ -173,6 +183,9 @@ class HoppusApp(App[None]):
         # HOPPUS-33's unlinked mentions will reuse it.
         self._index: Index | None = None
         self._index_root: Path | None = None
+        # Report-only integrity issue count for the status-line
+        # "problems" indicator (spec §19 D1, HOPPUS-40).
+        self._problem_count: int = 0
         # Live watcher slot (spec §8/D5, HOPPUS-38). The app does not
         # auto-start a watcher yet (HOPPUS-37 kept live watching off in
         # headless tests); when one is enabled, self-writes route through
@@ -204,6 +217,7 @@ class HoppusApp(App[None]):
         """
         self.set_keymap(resolve_keymap_overrides(self.config))
         self.vault_name = self.config.get("default_vault")
+        self._refresh_problems()
         self._refresh_status_line()
 
     # -- File Explorer -------------------------------------------------------
@@ -253,7 +267,38 @@ class HoppusApp(App[None]):
             status = self.query_one(StatusLine)
         except Exception:
             return
-        status.update_status(self.vault_name, self.note_title, self.word_count)
+        status.update_status(
+            self.vault_name,
+            self.note_title,
+            self.word_count,
+            problems=self._problem_count,
+        )
+
+    def _refresh_problems(self) -> None:
+        """
+        Recompute the report-only "problems" count (spec §19 D1).
+
+        Runs :func:`hoppus.integrity.audit_vault` over the active
+        vault's index and re-renders the status line with the count.
+        Report-only: never prompts. Fully guarded — no active vault or
+        a failed index build/audit resets the count to 0, never raises.
+        """
+        count = 0
+        try:
+            vault_root = self._active_vault_path()
+            if vault_root.is_dir():
+                # Reuse the cached index when it matches, but don't
+                # populate the cache here: the audit is a passive
+                # report and must not change when panes lazily index.
+                if self._index is not None and self._index_root == vault_root:
+                    index = self._index
+                else:
+                    index = Index.build(vault_root)
+                count = integrity.audit_vault(index).count
+        except Exception:
+            count = 0
+        self._problem_count = count
+        self._refresh_status_line()
 
     def watch_vault_name(self) -> None:
         """React to vault changes."""
@@ -292,6 +337,12 @@ class HoppusApp(App[None]):
             self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
                 path, self._active_index(root), root
             )
+        self._refresh_problems()
+        # D1 gate: opening a note is a report-only trigger by default —
+        # the indicator above is the only surface. Only the escape hatch
+        # (link_integrity.prompt_on = "always") may prompt here.
+        if integrity.should_prompt_on(self.config, "open"):
+            self.run_worker(self._run_integrity_pass(path), exclusive=False)
 
     def _active_index(self, vault_root: Path) -> Index:
         """
@@ -671,6 +722,7 @@ class HoppusApp(App[None]):
             self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
                 Path(note_path), self._index, vault_root
             )
+        self._refresh_problems()
         self.notify("Reindexed", severity="information", timeout=3)
 
     # -- Vault switching -------------------------------------------------------
@@ -733,3 +785,4 @@ class HoppusApp(App[None]):
         self.query_one("#backlinks-pane", BacklinksPane).clear()
         self.note_title = None
         self.word_count = None
+        self._refresh_problems()

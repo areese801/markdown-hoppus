@@ -3,11 +3,12 @@ Typer CLI application shared by the three interchangeable console commands
 ``hoppus``, ``mark``, and ``hop`` (spec §1, §10).
 
 Fully implemented here: ``vaults`` (list vaults under the Vaults Root) and
-the dispatch/skeleton for every always-available subcommand. Subcommands
-owned by later stories (``find``, ``new``, ``daily``, ``capture``,
-``preview``, ``index``/``reindex``, ``audit``, ``doctor``, ``mcp``) and the
-TUI launch are registered as clearly-marked stubs so ``--help`` shows the
-full command tree.
+``audit`` (report-only unresolved-wikilink report, spec §10 / §19 D1,
+HOPPUS-40), plus the dispatch/skeleton for every always-available
+subcommand. Subcommands owned by later stories (``find``, ``new``,
+``daily``, ``capture``, ``preview``, ``index``/``reindex``, ``doctor``,
+``mcp``) and the TUI launch are registered as clearly-marked stubs so
+``--help`` shows the full command tree.
 """
 
 from pathlib import Path
@@ -16,6 +17,8 @@ import typer
 
 from hoppus import __version__
 from hoppus.config import load_config
+from hoppus.index.indexer import Index
+from hoppus.integrity import audit_vault
 from hoppus.vault import Vault, discover_vaults
 
 NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
@@ -204,11 +207,44 @@ def find(
 
 
 @app.command()
-def audit() -> None:
+def audit(
+    vault: str = typer.Argument(
+        None, help="Vault name (default: the configured default vault)."
+    ),
+) -> None:
     """
-    Vault content health: orphans, unresolved links, broken anchors (spec §10).
+    Report vault content health: unresolved wikilinks (spec §10, D1).
+
+    Report-only — never prompts or mutates. Later stories extend the
+    report with orphans, broken anchors, and attachment/markdown-link
+    issues.
     """
-    _stub("audit")
+    config = load_config()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    name = vault or config["default_vault"]
+    selected = next((entry for entry in discovered if entry.name == name), None)
+    if selected is None:
+        typer.secho(
+            f"No vault named {name!r} under {vaults_root}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    index = Index.build(selected.path)
+    report = audit_vault(index)
+    if report.count == 0:
+        typer.echo(f"No unresolved links in {selected.name}.")
+        return
+    typer.echo(
+        f"{selected.name}: {report.count} unresolved link(s) "
+        f"across {report.note_count()} note(s)"
+    )
+    for note_path, issues in report.by_note().items():
+        relative = note_path.relative_to(selected.path)
+        for issue in issues:
+            typer.echo(f"  {relative}: [[{issue.target}]]")
 
 
 @app.command()

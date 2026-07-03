@@ -15,14 +15,23 @@ report-only and never prompt. Attachment refs (``![[image.png]]``) and
 standard markdown links are excluded here — they are report-only per
 spec §7.4.
 
+The report-only surface lives here too (spec §10, §19 D1):
+:func:`audit_vault` walks a built index and collects every unresolved
+wikilink into an :class:`AuditReport` — the shared core behind
+``hop audit`` and the TUI "problems" indicator. It never prompts,
+mutates, or creates anything. :func:`should_prompt_on` is the pure gate
+that keeps vault-open and watcher triggers report-only unless
+``link_integrity.prompt_on`` is ``"always"``.
+
 No Textual imports: the TUI (``hoppus.tui.app`` and the
 ``LinkIntegrityModal``) only supplies the decision loop.
 """
 
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from hoppus.fileops import create_note
 from hoppus.index.indexer import Index
@@ -264,6 +273,133 @@ def apply_integrity_decisions(
     ):
         text = correct_target(text, occurrence, new_target)
     return text, created
+
+
+@dataclass(frozen=True)
+class AuditIssue:
+    """
+    One vault-content problem surfaced by the report-only audit
+    (spec §10, §19 D1).
+
+    :param note_path: Path of the note containing the issue.
+    :param target: The link's raw target as written.
+    :param kind: Issue kind; ``"unresolved_wikilink"`` here. Later
+        stories add anchor/attachment/markdown-link kinds.
+    :param display: The link's ``|display`` text, or None.
+    :param anchor: The link's ``#anchor`` part, or None.
+    """
+
+    note_path: Path
+    target: str
+    kind: str
+    display: str | None = None
+    anchor: str | None = None
+
+
+@dataclass(frozen=True)
+class AuditReport:
+    """
+    The report-only outcome of a vault audit (spec §10, §19 D1).
+
+    A small, serialization-friendly record: just the issue tuple plus
+    counting/grouping conveniences for the CLI and the TUI indicator.
+
+    :param issues: Every collected issue, in stable (path, document)
+        order.
+    """
+
+    issues: tuple[AuditIssue, ...]
+
+    @property
+    def count(self) -> int:
+        """Total number of issues."""
+        return len(self.issues)
+
+    def by_note(self) -> dict[Path, list[AuditIssue]]:
+        """
+        Group the issues by note path, preserving the stable order.
+
+        :returns: Mapping of note path to its issues, keys in first-seen
+            order (which is sorted-path order for :func:`audit_vault`).
+        """
+        grouped: dict[Path, list[AuditIssue]] = {}
+        for issue in self.issues:
+            grouped.setdefault(issue.note_path, []).append(issue)
+        return grouped
+
+    def note_count(self) -> int:
+        """Number of distinct notes with at least one issue."""
+        return len({issue.note_path for issue in self.issues})
+
+
+def audit_vault(
+    index: Index,
+    *,
+    read_text: Callable[[Path], str] | None = None,
+) -> AuditReport:
+    """
+    Collect every unresolved wikilink in a vault, report-only (D1).
+
+    Iterates the index's notes in stable (sorted-path) order, reads
+    each note's text, and records one :class:`AuditIssue` per
+    unresolved occurrence found by :func:`find_unresolved_wikilinks`.
+    Notes whose text cannot be read (``OSError``) are skipped. This is
+    the shared core behind ``hop audit`` and the TUI "problems"
+    indicator: it never prompts, mutates, or creates anything.
+
+    :param index: The built vault index to audit.
+    :param read_text: Optional reader (for tests); defaults to
+        ``path.read_text(encoding="utf-8")``.
+    :returns: The collected report.
+    """
+    if read_text is None:
+
+        def read_text(path: Path) -> str:
+            return path.read_text(encoding="utf-8")
+
+    issues: list[AuditIssue] = []
+    for note_path in sorted(index.notes_by_path):
+        try:
+            text = read_text(note_path)
+        except OSError:
+            continue
+        for occurrence in find_unresolved_wikilinks(text, index, note_path):
+            link = occurrence.link
+            issues.append(
+                AuditIssue(
+                    note_path=note_path,
+                    target=link.target,
+                    kind="unresolved_wikilink",
+                    display=link.display,
+                    anchor=link.anchor,
+                )
+            )
+    return AuditReport(issues=tuple(issues))
+
+
+def should_prompt_on(config: Mapping[str, Any], trigger: str) -> bool:
+    """
+    Decide whether a trigger may run the interactive integrity pass.
+
+    This is the pure D1 gate that prevents a prompt-storm: only
+    ``"editor_return"`` always prompts. ``"open"`` and ``"watcher"``
+    prompt only when ``link_integrity.prompt_on`` is ``"always"``
+    (default ``"editor_return_only"`` keeps them report-only). Any
+    unknown trigger is False.
+
+    :param config: The merged configuration mapping (spec §12).
+    :param trigger: One of ``"editor_return"``, ``"open"``,
+        ``"watcher"``.
+    :returns: True when the trigger may prompt interactively.
+    """
+    if trigger == "editor_return":
+        return True
+    if trigger in ("open", "watcher"):
+        prompt_on = config.get("link_integrity", {}).get(
+            "prompt_on", "editor_return_only"
+        )
+        return prompt_on == "always"
+    return False
 
 
 def resolve_editor_command(environ: Mapping[str, str]) -> list[str]:
