@@ -4,11 +4,16 @@ Thin MCP server wrapper exposing the read and write tools over stdio
 
 All tool logic lives in the pure, unit-testable :mod:`hoppus.mcp.tools`
 module; this wrapper only registers one MCP tool per function and runs
-the FastMCP stdio transport. Write tools are registered by the separate
-:func:`_register_write_tools` helper so the ``mcp.read_only`` flag
-(HOPPUS-60) can skip them without touching the read tools.
+the FastMCP stdio transport.
+
+The ``mcp.read_only`` config flag (spec §11/§12, HOPPUS-60, default
+``False``) gates the write tools: when it is ``True``,
+:func:`build_server` registers only the nine read tools and skips
+:func:`_register_write_tools` entirely, so a read-only MCP context has
+no tool that can mutate a vault.
 """
 
+import asyncio
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -16,10 +21,56 @@ from mcp.server.fastmcp import FastMCP
 from hoppus.config import load_config
 from hoppus.mcp import tools
 
+READ_TOOL_NAMES: tuple[str, ...] = (
+    "list_vaults",
+    "list_notes",
+    "get_note",
+    "search_notes",
+    "list_tags",
+    "get_backlinks",
+    "get_links",
+    "neighbors",
+    "audit_vault",
+)
+
+WRITE_TOOL_NAMES: tuple[str, ...] = (
+    "create_note",
+    "update_note",
+    "append_to_note",
+    "rename_note",
+    "delete_note",
+)
+
+
+def write_tools_enabled(config: dict[str, Any]) -> bool:
+    """
+    Report whether the write tools should be registered for a config.
+
+    :param config: The merged configuration mapping (spec §12).
+    :returns: ``False`` when ``mcp.read_only`` is set, ``True`` otherwise.
+    """
+    return not config.get("mcp", {}).get("read_only", False)
+
+
+def registered_tool_names(config: dict[str, Any] | None = None) -> list[str]:
+    """
+    Build a server for ``config`` and return its registered tool names.
+
+    A test/introspection seam for the ``mcp.read_only`` gate; no
+    transport is started.
+
+    :param config: The merged configuration mapping (spec §12); loaded
+        via :func:`hoppus.config.load_config` when omitted.
+    :returns: The sorted names of the tools the server exposes.
+    """
+    server = build_server(config)
+    return sorted(tool.name for tool in asyncio.run(server.list_tools()))
+
 
 def build_server(config: dict[str, Any] | None = None) -> FastMCP:
     """
-    Assemble the hoppus MCP server with the nine read tools registered.
+    Assemble the hoppus MCP server with the nine read tools registered,
+    plus the five write tools unless ``mcp.read_only`` is set.
 
     Returned without starting any transport, so callers (and tests) can
     introspect the registered tools.
@@ -112,7 +163,8 @@ def build_server(config: dict[str, Any] | None = None) -> FastMCP:
         """
         return tools.audit_vault(cfg, vault=vault)
 
-    _register_write_tools(server, cfg)
+    if write_tools_enabled(cfg):
+        _register_write_tools(server, cfg)
     return server
 
 
