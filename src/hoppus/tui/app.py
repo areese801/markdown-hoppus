@@ -38,11 +38,13 @@ from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.index.watcher import VaultWatcher
 from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import decode_href
+from hoppus.search.engine import SearchResult
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
+from hoppus.tui.modals.search_screen import SearchScreen
 from hoppus.tui.modals.vault_switcher import VaultSwitcherModal
 from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.panes.explorer import ExplorerPane
@@ -530,8 +532,24 @@ class HoppusApp(App[None]):
         self.push_screen(QuickSwitcherModal(index, vault_root), handle_result)
 
     def action_search(self) -> None:
-        """In-TUI search (later story)."""
-        self._not_implemented("Search")
+        """
+        Open the in-TUI search screen (spec §9.8, HOPPUS-44).
+
+        Live fuzzy search over titles and content with targeted
+        operators; Enter opens the chosen note in the preview.
+        """
+        vault_root = self._active_vault_path()
+        index = self._active_index(vault_root)
+        backend = str(self.config.get("search", {}).get("content_backend", "auto"))
+
+        async def handle_result(result: SearchResult | None) -> None:
+            if result is None:
+                return
+            await self.open_note(result.path, vault_root=vault_root)
+
+        self.push_screen(
+            SearchScreen(index, vault_root, backend=backend), handle_result
+        )
 
     def action_open_editor(self) -> None:
         """
