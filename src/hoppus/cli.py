@@ -20,7 +20,7 @@ from hoppus import __version__
 from hoppus.config import load_config
 from hoppus.environment import run_doctor
 from hoppus.index.indexer import Index
-from hoppus.integrity import audit_vault
+from hoppus.integrity import AuditIssue, audit_vault
 from hoppus.vault import Vault, discover_vaults
 
 NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
@@ -208,6 +208,34 @@ def find(
     _stub("find")
 
 
+def _format_issue(issue: AuditIssue) -> str:
+    """
+    Render an audit issue as its written link form plus a kind label.
+
+    Wikilinks render as ``[[target#anchor|display]]`` (embeds keep the
+    ``!``); markdown links render as ``[display](target)``. The label
+    is the issue kind with underscores spaced, e.g. ``(broken anchor)``
+    — plain and greppable.
+
+    Args:
+        issue: The audit issue to render.
+
+    Returns:
+        The rendered line fragment, e.g. ``![[img.png]] (missing
+        attachment)``.
+    """
+    if issue.is_wikilink:
+        inner = issue.target
+        if issue.anchor:
+            inner += f"#{issue.anchor}"
+        if issue.display:
+            inner += f"|{issue.display}"
+        rendered = f"{'!' if issue.is_embed else ''}[[{inner}]]"
+    else:
+        rendered = f"[{issue.display or ''}]({issue.target})"
+    return f"{rendered} ({issue.kind.replace('_', ' ')})"
+
+
 @app.command()
 def audit(
     vault: str = typer.Argument(
@@ -215,11 +243,11 @@ def audit(
     ),
 ) -> None:
     """
-    Report vault content health: unresolved wikilinks (spec §10, D1).
+    Report vault content health (spec §10, §7.4, D1): unresolved
+    wikilinks, broken anchors, missing attachments, and broken markdown
+    links, each gated by its ``link_integrity`` toggle (§7.6).
 
-    Report-only — never prompts or mutates. Later stories extend the
-    report with orphans, broken anchors, and attachment/markdown-link
-    issues.
+    Report-only — never prompts or mutates.
     """
     config = load_config()
     vaults_root = Path(config["vaults_root"]).expanduser()
@@ -235,7 +263,7 @@ def audit(
         raise typer.Exit(code=1)
 
     index = Index.build(selected.path)
-    report = audit_vault(index)
+    report = audit_vault(index, config=config)
     if report.count == 0:
         typer.echo(f"No unresolved links in {selected.name}.")
         return
@@ -246,7 +274,7 @@ def audit(
     for note_path, issues in report.by_note().items():
         relative = note_path.relative_to(selected.path)
         for issue in issues:
-            typer.echo(f"  {relative}: [[{issue.target}]]")
+            typer.echo(f"  {relative}: {_format_issue(issue)}")
 
 
 @app.command()

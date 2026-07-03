@@ -16,12 +16,15 @@ standard markdown links are excluded here — they are report-only per
 spec §7.4.
 
 The report-only surface lives here too (spec §10, §19 D1):
-:func:`audit_vault` walks a built index and collects every unresolved
-wikilink into an :class:`AuditReport` — the shared core behind
-``hop audit`` and the TUI "problems" indicator. It never prompts,
-mutates, or creates anything. :func:`should_prompt_on` is the pure gate
-that keeps vault-open and watcher triggers report-only unless
-``link_integrity.prompt_on`` is ``"always"``.
+:func:`audit_vault` walks a built index and collects every link issue —
+unresolved wikilinks (§7.3), broken anchors, missing attachments, and
+broken markdown links (§7.4), each gated by its ``link_integrity``
+toggle (§7.6) — into an :class:`AuditReport` via :func:`audit_note`.
+This is the shared core behind ``hop audit`` and the TUI "problems"
+indicator. It never prompts, mutates, or creates anything.
+:func:`should_prompt_on` is the pure gate that keeps vault-open and
+watcher triggers report-only unless ``link_integrity.prompt_on`` is
+``"always"``.
 
 No Textual imports: the TUI (``hoppus.tui.app`` and the
 ``LinkIntegrityModal``) only supplies the decision loop.
@@ -37,8 +40,21 @@ from hoppus.fileops import create_note
 from hoppus.index.indexer import Index
 from hoppus.model import Link, Note
 from hoppus.parse.links import Resolver
-from hoppus.parse.ofm import _WIKILINK_RE, _mask, _parse_wikilink
+from hoppus.parse.ofm import (
+    _MD_LINK_RE,
+    _WIKILINK_RE,
+    _blank,
+    _mask,
+    _parse_md_link,
+    _parse_wikilink,
+)
 from hoppus.search.fuzzy import rank
+
+#: Issue kinds surfaced by the report-only audit (spec §7.3, §7.4).
+KIND_UNRESOLVED_WIKILINK = "unresolved_wikilink"
+KIND_BROKEN_ANCHOR = "broken_anchor"
+KIND_MISSING_ATTACHMENT = "missing_attachment"
+KIND_BROKEN_MARKDOWN_LINK = "broken_markdown_link"
 
 #: File extensions treated as attachments — unresolved refs to these are
 #: report-only (spec §7.4), never part of the correct-or-create prompts.
@@ -283,10 +299,14 @@ class AuditIssue:
 
     :param note_path: Path of the note containing the issue.
     :param target: The link's raw target as written.
-    :param kind: Issue kind; ``"unresolved_wikilink"`` here. Later
-        stories add anchor/attachment/markdown-link kinds.
+    :param kind: One of the ``KIND_*`` constants:
+        :data:`KIND_UNRESOLVED_WIKILINK`, :data:`KIND_BROKEN_ANCHOR`,
+        :data:`KIND_MISSING_ATTACHMENT`, or
+        :data:`KIND_BROKEN_MARKDOWN_LINK`.
     :param display: The link's ``|display`` text, or None.
     :param anchor: The link's ``#anchor`` part, or None.
+    :param is_wikilink: True for ``[[...]]``; False for ``[text](path)``.
+    :param is_embed: True for ``![[...]]`` embeds.
     """
 
     note_path: Path
@@ -294,6 +314,8 @@ class AuditIssue:
     kind: str
     display: str | None = None
     anchor: str | None = None
+    is_wikilink: bool = True
+    is_embed: bool = False
 
 
 @dataclass(frozen=True)
@@ -331,23 +353,176 @@ class AuditReport:
         """Number of distinct notes with at least one issue."""
         return len({issue.note_path for issue in self.issues})
 
+    def by_kind(self) -> dict[str, list[AuditIssue]]:
+        """
+        Group the issues by kind, preserving the stable order.
+
+        :returns: Mapping of issue kind to its issues, keys in
+            first-seen order.
+        """
+        grouped: dict[str, list[AuditIssue]] = {}
+        for issue in self.issues:
+            grouped.setdefault(issue.kind, []).append(issue)
+        return grouped
+
+
+def _integrity_toggles(config: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """
+    Return the ``link_integrity`` section of a config, or an empty
+    mapping (every toggle then falls back to its default: on).
+    """
+    if config is None:
+        return {}
+    return config.get("link_integrity", {})
+
+
+def _issue_from_link(note_path: Path, link: Link, kind: str) -> AuditIssue:
+    """
+    Build an :class:`AuditIssue` carrying a link's written form.
+    """
+    return AuditIssue(
+        note_path=note_path,
+        target=link.target,
+        kind=kind,
+        display=link.display,
+        anchor=link.anchor,
+        is_wikilink=link.is_wikilink,
+        is_embed=link.is_embed,
+    )
+
+
+def audit_note(
+    text: str,
+    index: Index,
+    note_path: Path,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> list[AuditIssue]:
+    """
+    Collect every report-only link issue in one note's text, in
+    document order (spec §7.3, §7.4).
+
+    Links are located on the masked text (frontmatter, code fences, and
+    inline code blanked), so links inside code are never flagged. Four
+    checks run, each gated by its ``link_integrity`` toggle (spec §7.6;
+    a None config means all four are on, matching the defaults):
+
+    - Unresolved note-target wikilinks (the §7.3 hard rule, via
+      :func:`find_unresolved_wikilinks`), gated by
+      ``enforce_no_dangling_wikilinks`` →
+      :data:`KIND_UNRESOLVED_WIKILINK`.
+    - Wikilinks/embeds whose attachment target does not resolve, and
+      markdown links to a missing attachment, gated by
+      ``report_missing_attachments`` → :data:`KIND_MISSING_ATTACHMENT`.
+    - Other markdown links ``[text](path)`` that do not resolve
+      (external URLs and bare ``#fragment`` targets are never flagged),
+      gated by ``report_broken_markdown_links`` →
+      :data:`KIND_BROKEN_MARKDOWN_LINK`.
+    - Wikilinks that resolve to a note (including same-note anchors)
+      whose ``#Heading``/``#^block`` anchor does not resolve there,
+      gated by ``warn_missing_anchor`` → :data:`KIND_BROKEN_ANCHOR`.
+      Never auto-created — report only.
+
+    :param text: The note's full original text.
+    :param index: The built vault index to resolve against.
+    :param note_path: Path of the note containing the links.
+    :param config: The merged configuration mapping (spec §12), or None
+        for all checks on.
+    :returns: The note's issues, in document order.
+    """
+    toggles = _integrity_toggles(config)
+    check_wikilinks = toggles.get("enforce_no_dangling_wikilinks", True)
+    check_anchors = toggles.get("warn_missing_anchor", True)
+    check_attachments = toggles.get("report_missing_attachments", True)
+    check_md_links = toggles.get("report_broken_markdown_links", True)
+
+    notes = list(index.notes_by_path.values())
+    resolver = Resolver(notes, index.vault_root, attachments=index._attachments)
+    current_note = index.notes_by_path.get(note_path)
+    masked = _mask(text)
+
+    found: list[tuple[int, AuditIssue]] = []
+
+    if check_wikilinks:
+        for occurrence in find_unresolved_wikilinks(text, index, note_path):
+            found.append(
+                (
+                    occurrence.start,
+                    _issue_from_link(
+                        note_path, occurrence.link, KIND_UNRESOLVED_WIKILINK
+                    ),
+                )
+            )
+
+    for match in _WIKILINK_RE.finditer(masked):
+        link = _parse_wikilink(match, note_path)
+        if link.target and _is_attachment_target(link.target):
+            if check_attachments and resolver.resolve(link, current_note) is None:
+                found.append(
+                    (
+                        match.start(),
+                        _issue_from_link(note_path, link, KIND_MISSING_ATTACHMENT),
+                    )
+                )
+            continue
+        if resolver.resolve(link, current_note) is None:
+            continue
+        if check_anchors and not resolver.anchor_resolves(link, current_note):
+            found.append(
+                (
+                    match.start(),
+                    _issue_from_link(note_path, link, KIND_BROKEN_ANCHOR),
+                )
+            )
+
+    for match in _MD_LINK_RE.finditer(_WIKILINK_RE.sub(_blank, masked)):
+        link = _parse_md_link(match, note_path)
+        if "://" in link.target or not link.target.partition("#")[0].strip():
+            continue
+        if resolver.resolve(link, current_note) is not None:
+            continue
+        if _is_attachment_target(link.target):
+            if check_attachments:
+                found.append(
+                    (
+                        match.start(),
+                        _issue_from_link(note_path, link, KIND_MISSING_ATTACHMENT),
+                    )
+                )
+        elif check_md_links:
+            found.append(
+                (
+                    match.start(),
+                    _issue_from_link(note_path, link, KIND_BROKEN_MARKDOWN_LINK),
+                )
+            )
+
+    found.sort(key=lambda pair: pair[0])
+    return [issue for _, issue in found]
+
 
 def audit_vault(
     index: Index,
     *,
+    config: Mapping[str, Any] | None = None,
     read_text: Callable[[Path], str] | None = None,
 ) -> AuditReport:
     """
-    Collect every unresolved wikilink in a vault, report-only (D1).
+    Collect every report-only link issue in a vault (D1, spec §7.4).
 
     Iterates the index's notes in stable (sorted-path) order, reads
-    each note's text, and records one :class:`AuditIssue` per
-    unresolved occurrence found by :func:`find_unresolved_wikilinks`.
-    Notes whose text cannot be read (``OSError``) are skipped. This is
-    the shared core behind ``hop audit`` and the TUI "problems"
-    indicator: it never prompts, mutates, or creates anything.
+    each note's text, and records the :class:`AuditIssue` list produced
+    by :func:`audit_note` — unresolved wikilinks, broken anchors,
+    missing attachments, and broken markdown links, each gated by its
+    ``link_integrity`` toggle (spec §7.6). A None config runs all four
+    checks, matching the config defaults. Notes whose text cannot be
+    read (``OSError``) are skipped. This is the shared core behind
+    ``hop audit`` and the TUI "problems" indicator: it never prompts,
+    mutates, or creates anything.
 
     :param index: The built vault index to audit.
+    :param config: The merged configuration mapping (spec §12), or None
+        for all checks on.
     :param read_text: Optional reader (for tests); defaults to
         ``path.read_text(encoding="utf-8")``.
     :returns: The collected report.
@@ -363,17 +538,7 @@ def audit_vault(
             text = read_text(note_path)
         except OSError:
             continue
-        for occurrence in find_unresolved_wikilinks(text, index, note_path):
-            link = occurrence.link
-            issues.append(
-                AuditIssue(
-                    note_path=note_path,
-                    target=link.target,
-                    kind="unresolved_wikilink",
-                    display=link.display,
-                    anchor=link.anchor,
-                )
-            )
+        issues.extend(audit_note(text, index, note_path, config=config))
     return AuditReport(issues=tuple(issues))
 
 

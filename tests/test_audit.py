@@ -62,6 +62,7 @@ def test_audit_vault_excludes_attachments_anchors_and_code_fences(
     """
     vault = tmp_path / "vault"
     vault.mkdir()
+    (vault / "missing.png").write_bytes(b"\x00")
     (vault / "Note.md").write_text(
         "An attachment ![[missing.png]] and a same-note anchor [[#Heading]].\n"
         "\n"
