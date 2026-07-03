@@ -52,6 +52,7 @@ from hoppus.naming import validate_note_name
 from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.search.engine import SearchResult
+from hoppus.system import SystemOpenError, open_in_system_app
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.graph_view import GraphScreen
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
@@ -703,8 +704,23 @@ class HoppusApp(App[None]):
             self._index_root = vault_root
 
     def action_open_system(self) -> None:
-        """Open in system app (later story)."""
-        self._not_implemented("Open in system app")
+        """
+        Open the active note in the OS default app (spec §9.5, HOPPUS-55).
+
+        Delegates to :func:`hoppus.system.open_in_system_app` (``open`` /
+        ``xdg-open`` / ``start`` per platform). Fully guarded — no active
+        note or a missing/failed opener notifies instead of crashing.
+        """
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        try:
+            open_in_system_app(note_path)
+        except SystemOpenError as error:
+            self.notify(str(error), severity="warning", timeout=5)
+            return
+        self.notify("Opened in system app", severity="information", timeout=3)
 
     def action_open_browser(self) -> None:
         """Open in browser (later story)."""
