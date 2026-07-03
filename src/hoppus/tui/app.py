@@ -40,6 +40,7 @@ from hoppus.parse.links import Resolver
 from hoppus.render.ofm_markdown import decode_href
 from hoppus.search.engine import SearchResult
 from hoppus.tui.command_palette import HoppusCommandProvider
+from hoppus.tui.graph_view import GraphScreen
 from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
 from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
@@ -768,16 +769,70 @@ class HoppusApp(App[None]):
             self.notify(f"Linked to {target}", severity="information", timeout=3)
 
     def action_toggle_graph(self) -> None:
-        """Graph view (later story)."""
-        self._not_implemented("Graph view")
+        """
+        Toggle the local graph view for the active note (spec §9.7,
+        HOPPUS-48).
+
+        Pushes a :class:`GraphScreen` centered on the active note; when
+        the screen is already open, ``g`` closes it. Choosing a node
+        jumps to it in the preview.
+        """
+        if isinstance(self.screen, GraphScreen):
+            self.screen.dismiss(None)
+            return
+        note_path = self.preview.note_path
+        if note_path is None:
+            self.notify("No active note", severity="information", timeout=3)
+            return
+        vault_root = self.preview.vault_root or self._active_vault_path()
+        if vault_root is None or not vault_root.is_dir():
+            self.notify("No open vault", severity="information", timeout=3)
+            return
+        graph_config = self.config.get("graph", {})
+        index = self._active_index(vault_root)
+
+        async def handle_result(path: Path | None) -> None:
+            if path is None:
+                return
+            await self.open_note(path, vault_root=vault_root)
+
+        self.push_screen(
+            GraphScreen(
+                index,
+                Path(note_path),
+                initial_radius=int(graph_config.get("default_degrees", 2)),
+                max_degrees=int(graph_config.get("max_degrees", 5)),
+                max_nodes=int(graph_config.get("max_nodes", 60)),
+                exclude_hub_threshold=graph_config.get("exclude_hub_threshold"),
+                vault_root=vault_root,
+            ),
+            handle_result,
+        )
 
     def action_graph_radius_up(self) -> None:
-        """Increase graph hop radius (later story)."""
-        self._not_implemented("Graph radius")
+        """
+        Increase the graph hop radius (spec §9.16 ``+``).
+
+        Delegates to the open :class:`GraphScreen`; a no-op notify when
+        the graph view is not open (the ``+`` key does its real work as
+        a screen binding while the graph is showing).
+        """
+        if isinstance(self.screen, GraphScreen):
+            self.screen.action_radius_up()
+            return
+        self.notify("Graph radius: open the graph view first (g)", timeout=3)
 
     def action_graph_radius_down(self) -> None:
-        """Decrease graph hop radius (later story)."""
-        self._not_implemented("Graph radius")
+        """
+        Decrease the graph hop radius (spec §9.16 ``-``).
+
+        Delegates to the open :class:`GraphScreen`; a no-op notify when
+        the graph view is not open.
+        """
+        if isinstance(self.screen, GraphScreen):
+            self.screen.action_radius_down()
+            return
+        self.notify("Graph radius: open the graph view first (g)", timeout=3)
 
     def action_daily_note(self) -> None:
         """Daily note (later story)."""
