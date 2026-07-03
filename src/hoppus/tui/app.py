@@ -506,8 +506,29 @@ class HoppusApp(App[None]):
         self._not_implemented("Yank menu")
 
     def action_reindex(self) -> None:
-        """Reindex vault (later story)."""
-        self._not_implemented("Reindex")
+        """
+        Rebuild the active vault's index (spec §9.16 ``r``, HOPPUS-37).
+
+        This is the manual fallback of spec §8's graceful degradation:
+        live watching via ``hoppus.index.watcher.VaultWatcher`` is
+        deliberately NOT auto-started by the app in this story (a
+        background observer thread risks flakiness in headless tests);
+        the ``r`` keybind rebuilds on demand instead. Invalidates the
+        cached index, rebuilds it, and refreshes the open note's
+        backlinks pane.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            self.notify("Reindex: no open vault", severity="information", timeout=3)
+            return
+        self._index = Index.build(vault_root)
+        self._index_root = vault_root
+        note_path = self.preview.note_path
+        if note_path is not None:
+            self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
+                Path(note_path), self._index, vault_root
+            )
+        self.notify("Reindexed", severity="information", timeout=3)
 
     # -- Vault switching -------------------------------------------------------
 
