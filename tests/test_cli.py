@@ -152,7 +152,6 @@ def test_open_unknown_vault_exits_nonzero(vaults_root: Path) -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["doctor"],
         ["index"],
         ["reindex"],
         ["mcp"],

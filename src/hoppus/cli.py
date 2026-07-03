@@ -4,11 +4,12 @@ Typer CLI application shared by the three interchangeable console commands
 
 Fully implemented here: ``vaults`` (list vaults under the Vaults Root) and
 ``audit`` (report-only unresolved-wikilink report, spec §10 / §19 D1,
-HOPPUS-40), plus the dispatch/skeleton for every always-available
+HOPPUS-40), plus ``doctor`` (environment health report, spec §7.5,
+HOPPUS-43) and the dispatch/skeleton for every always-available
 subcommand. Subcommands owned by later stories (``find``, ``new``,
-``daily``, ``capture``, ``preview``, ``index``/``reindex``, ``doctor``,
-``mcp``) and the TUI launch are registered as clearly-marked stubs so
-``--help`` shows the full command tree.
+``daily``, ``capture``, ``preview``, ``index``/``reindex``, ``mcp``) and
+the TUI launch are registered as clearly-marked stubs so ``--help`` shows
+the full command tree.
 """
 
 from pathlib import Path
@@ -17,6 +18,7 @@ import typer
 
 from hoppus import __version__
 from hoppus.config import load_config
+from hoppus.environment import run_doctor
 from hoppus.index.indexer import Index
 from hoppus.integrity import audit_vault
 from hoppus.vault import Vault, discover_vaults
@@ -251,8 +253,42 @@ def audit(
 def doctor() -> None:
     """
     Environment health: optional binaries, editor detection, config (spec §7.5).
+
+    Distinct from ``audit`` (content health). Always runs to completion —
+    problems become report lines, not nonzero exits.
     """
-    _stub("doctor")
+    report = run_doctor(load_config())
+
+    typer.echo("Optional accelerators:")
+    for name, path in report.binaries.items():
+        typer.echo(f"  {name}: {path or 'not found'}")
+
+    typer.echo("Editor:")
+    typer.echo(f"  command: {' '.join(report.editor_info.argv)}")
+    typer.echo(f"  nvim: {'yes' if report.editor_info.is_nvim else 'no'}")
+    plugin_status = {True: "detected", False: "not detected", None: "unknown"}[
+        report.plugin_detected
+    ]
+    typer.echo(f"  obsidian.nvim: {plugin_status}")
+    if report.nudge:
+        typer.echo(f"  {report.nudge}")
+
+    typer.echo("Config health:")
+    if report.config_warnings:
+        for warning in report.config_warnings:
+            typer.echo(f"  warning: {warning}")
+    else:
+        typer.echo("  OK")
+
+    typer.echo("Vaults:")
+    typer.echo(f"  root: {report.vaults_root}")
+    if report.vaults_error is not None:
+        typer.echo(f"  warning: {report.vaults_error}")
+    else:
+        names = report.vault_names or []
+        typer.echo(f"  discovered: {len(names)}")
+        for name in names:
+            typer.echo(f"    {name}")
 
 
 def main() -> None:
