@@ -1,7 +1,8 @@
 """
 CLI tests for the typer app shared by ``hoppus`` / ``mark`` / ``hop``
-(spec §1, §10): help output, the ``vaults`` subcommand against a hermetic
-temp Vaults Root, stubbed subcommands, and console-script wiring.
+(spec §1, §10): help output, the ``vaults``/``new``/``index``/``reindex``
+subcommands against a hermetic temp Vaults Root, and console-script
+wiring.
 """
 
 from pathlib import Path
@@ -99,7 +100,6 @@ def test_bare_invocation_launches_tui_on_default_vault(
     """
     result = runner.invoke(cli.app, [])
     assert result.exit_code == 0
-    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.output
     assert len(launched_apps) == 1
     app = launched_apps[0]
     assert app.config["default_vault"] == "Personal"
@@ -207,7 +207,6 @@ def test_open_named_vault_launches_tui(
     """
     result = runner.invoke(cli.app, ["open", "Work"])
     assert result.exit_code == 0
-    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.output
     assert len(launched_apps) == 1
     app = launched_apps[0]
     assert app.config["default_vault"] == "Work"
@@ -237,25 +236,93 @@ def test_open_unknown_vault_exits_nonzero(
     assert launched_apps == []
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["index"],
-        ["reindex"],
-        ["new"],
-        ["preview"],
-    ],
-)
-def test_stubbed_subcommands_exit_nonzero_on_stderr(args: list[str]) -> None:
+def test_help_has_no_placeholder_commands() -> None:
     """
-    Every stubbed subcommand prints its placeholder line to STDERR and
-    exits with the stub exit code, so scripts and CI can detect the
-    no-op (HOPPUS-71 F6).
+    ``--help`` never advertises a not-yet-implemented placeholder
+    (HOPPUS-99): every listed subcommand is real.
     """
-    result = runner.invoke(cli.app, args)
-    assert result.exit_code == cli.STUB_EXIT_CODE
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.stderr
-    assert cli.NOT_IMPLEMENTED_SUFFIX not in result.stdout
+    result = runner.invoke(cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "not yet implemented" not in result.output
+
+
+def test_new_creates_note_at_vault_root(vaults_root: Path) -> None:
+    """
+    ``new TITLE`` creates an empty note at the default vault's root and
+    prints its absolute path (HOPPUS-99).
+    """
+    result = runner.invoke(cli.app, ["new", "Fresh Idea"])
+    assert result.exit_code == 0
+    created = vaults_root / "Personal" / "Fresh Idea.md"
+    assert created.is_file()
+    assert created.read_text(encoding="utf-8") == ""
+    assert str(created) in result.output
+
+
+def test_new_refuses_collision(vaults_root: Path) -> None:
+    """
+    ``new`` never overwrites an existing note — it errors and exits 1
+    (spec §5.2).
+    """
+    existing = vaults_root / "Personal" / "Taken.md"
+    existing.write_text("keep me\n", encoding="utf-8")
+    result = runner.invoke(cli.app, ["new", "Taken"])
+    assert result.exit_code == 1
+    assert "already exists" in result.stderr
+    assert existing.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_new_rejects_invalid_title(vaults_root: Path) -> None:
+    """
+    A title with reserved characters (spec §5.2) exits 1 with a clear
+    message and creates nothing.
+    """
+    result = runner.invoke(cli.app, ["new", "Bad/Name"])
+    assert result.exit_code == 1
+    assert "Invalid name" in result.stderr
+    assert not (vaults_root / "Personal" / "Bad").exists()
+
+
+def test_new_without_title_exits_nonzero(vaults_root: Path) -> None:
+    """
+    ``new`` without a TITLE exits 1 with a clear message.
+    """
+    result = runner.invoke(cli.app, ["new"])
+    assert result.exit_code == 1
+    assert "requires a TITLE" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["index", "reindex"])
+def test_index_and_reindex_print_summary(vaults_root: Path, command: str) -> None:
+    """
+    ``index`` and ``reindex`` build the default vault's index and print
+    a note/link/tag summary, exiting 0 (HOPPUS-99).
+    """
+    personal = vaults_root / "Personal"
+    (personal / "Alpha.md").write_text(
+        "#projects\n\nSee [[Beta]] and [[Missing]].\n", encoding="utf-8"
+    )
+    (personal / "Beta.md").write_text("Back to [[Alpha]].\n", encoding="utf-8")
+    result = runner.invoke(cli.app, [command])
+    assert result.exit_code == 0
+    assert "Personal: indexed 2 note(s), 3 link(s), 1 tag(s)" in result.output
+
+
+@pytest.mark.parametrize("command", ["index", "reindex"])
+def test_index_and_reindex_accept_vault_argument(
+    vaults_root: Path, command: str
+) -> None:
+    """
+    An explicit vault name selects that vault; an unknown name exits 1.
+    """
+    (vaults_root / "Work" / "Memo.md").write_text("Hi\n", encoding="utf-8")
+    result = runner.invoke(cli.app, [command, "Work"])
+    assert result.exit_code == 0
+    assert "Work: indexed 1 note(s), 0 link(s), 0 tag(s)" in result.output
+
+    result = runner.invoke(cli.app, [command, "Nope"])
+    assert result.exit_code == 1
+    assert "No vault named" in result.stderr
 
 
 def test_package_main_delegates_to_cli(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,13 +1,15 @@
 """
-CLI tests for ``preview --browser`` (spec §10, §9.5, HOPPUS-56),
-hermetic via ``CliRunner`` with the browser opener patched — no real
-browser or network is ever touched.
+CLI tests for ``preview`` (spec §10, §9.5, HOPPUS-56, HOPPUS-99):
+the ``--browser`` path with the opener patched, and the terminal path
+through the shared ``hoppus.render.terminal`` renderers — hermetic via
+``CliRunner``; no real browser, glow binary, or network is ever touched.
 """
 
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 from hoppus import cli
@@ -197,11 +199,70 @@ def test_preview_unknown_note_name_exits_nonzero(
     assert opened == []
 
 
-def test_preview_without_browser_stays_stubbed(note: Path) -> None:
+def test_preview_terminal_renders_note(note: Path) -> None:
     """
-    Terminal preview (no ``--browser``) prints the stub notice to
-    STDERR and exits with the stub exit code (HOPPUS-71 F6).
+    Terminal preview (no ``--browser``) renders the note's Markdown to
+    STDOUT and exits 0 (HOPPUS-99).
     """
     result = runner.invoke(cli.app, ["preview", str(note)])
-    assert result.exit_code == cli.STUB_EXIT_CODE
-    assert cli.NOT_IMPLEMENTED_SUFFIX in result.stderr
+    assert result.exit_code == 0
+    assert "Hello" in result.output
+    assert "print(1)" in result.output
+
+
+def test_preview_terminal_resolves_note_name(note: Path) -> None:
+    """
+    Terminal preview resolves a note name in the default vault, same as
+    the ``--browser`` path (HOPPUS-72 F9 semantics).
+    """
+    result = runner.invoke(cli.app, ["preview", "Real Note"])
+    assert result.exit_code == 0
+    assert "From The Vault" in result.output
+
+
+def test_preview_terminal_uses_glow_when_selected(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    With ``preview.renderer: glow`` and glow "available", the terminal
+    preview prints glow's output instead of the native render.
+    """
+    monkeypatch.setattr(cli, "select_renderer", lambda config: "glow", raising=True)
+    monkeypatch.setattr(
+        cli, "render_glow", lambda text: Text("GLOW OUTPUT"), raising=True
+    )
+    result = runner.invoke(cli.app, ["preview", str(note)])
+    assert result.exit_code == 0
+    assert "GLOW OUTPUT" in result.output
+
+
+def test_preview_terminal_falls_back_when_glow_fails(
+    note: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    When glow is selected but fails (returns None), the terminal preview
+    falls back to the native renderer instead of erroring.
+    """
+    monkeypatch.setattr(cli, "select_renderer", lambda config: "glow", raising=True)
+    monkeypatch.setattr(cli, "render_glow", lambda text: None, raising=True)
+    result = runner.invoke(cli.app, ["preview", str(note)])
+    assert result.exit_code == 0
+    assert "Hello" in result.output
+
+
+def test_preview_terminal_unknown_note_exits_nonzero(note: Path) -> None:
+    """
+    A reference that is neither a file nor a resolvable note name exits
+    1 on the terminal path too.
+    """
+    result = runner.invoke(cli.app, ["preview", "No Such Note"])
+    assert result.exit_code == 1
+
+
+def test_preview_without_path_exits_nonzero(note: Path) -> None:
+    """
+    ``preview`` without a PATH exits 1 with a clear message.
+    """
+    result = runner.invoke(cli.app, ["preview"])
+    assert result.exit_code == 1
+    assert "requires a PATH" in result.stderr

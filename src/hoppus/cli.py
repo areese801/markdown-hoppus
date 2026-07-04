@@ -10,12 +10,13 @@ HOPPUS-46), ``daily`` (open/create today's daily note, spec §9.9,
 HOPPUS-49), ``capture`` (quick-capture to the inbox, spec §9.11,
 HOPPUS-51), and the dispatch/skeleton for every always-available
 subcommand. ``preview --browser`` renders locally to the browser (spec
-§9.5, HOPPUS-56). ``mcp`` launches the bundled MCP server over stdio
-(spec §11, HOPPUS-58). Bare invocation and ``open`` launch the real TUI
-(:class:`hoppus.tui.app.HoppusApp`, HOPPUS-68). Subcommands owned by later
-stories (``new``, ``preview`` without ``--browser``, ``index``/``reindex``)
-are registered as clearly-marked stubs so ``--help`` shows the full command
-tree.
+§9.5, HOPPUS-56); without ``--browser`` it renders to the terminal via
+the shared :mod:`hoppus.render.terminal` renderers (HOPPUS-99). ``mcp``
+launches the bundled MCP server over stdio (spec §11, HOPPUS-58). Bare
+invocation and ``open`` launch the real TUI
+(:class:`hoppus.tui.app.HoppusApp`, HOPPUS-68). ``new`` creates a note at
+the vault root and ``index``/``reindex`` build the vault index and print
+a summary (HOPPUS-99) — no subcommand is a stub anymore.
 """
 
 from datetime import datetime
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.console import Console
+from rich.markdown import Markdown
 
 from hoppus import __version__
 from hoppus.capture import capture_note
@@ -35,6 +38,7 @@ from hoppus.config import (
 )
 from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
+from hoppus.fileops import create_note
 from hoppus.find import run_find
 from hoppus.index.indexer import Index
 from hoppus.integrity import (
@@ -51,10 +55,9 @@ from hoppus.render.browser import (
     open_in_browser,
     write_preview_html,
 )
+from hoppus.render.terminal import render_glow, render_native, select_renderer
 from hoppus.tui.app import HoppusApp
 from hoppus.vault import Vault, discover_vaults, resolve_default_vault
-
-NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
 
 app = typer.Typer(
     name="hoppus",
@@ -216,28 +219,6 @@ def _select_vault(
     return selected
 
 
-STUB_EXIT_CODE = 3
-"""Exit code shared by every not-yet-implemented stub subcommand."""
-
-
-def _stub(feature: str) -> None:
-    """
-    Report an unimplemented subcommand and exit non-zero.
-
-    Prints the placeholder notice to STDERR and exits with
-    :data:`STUB_EXIT_CODE` so scripts and CI can detect the no-op
-    instead of mistaking it for success.
-
-    Args:
-        feature: Human-readable name of the feature being stubbed.
-
-    Raises:
-        typer.Exit: Always, with code :data:`STUB_EXIT_CODE`.
-    """
-    typer.secho(f"{feature}: {NOT_IMPLEMENTED_SUFFIX}", err=True)
-    raise typer.Exit(code=STUB_EXIT_CODE)
-
-
 def _launch_tui(vault: str | None = None) -> None:
     """
     Resolve a vault and run the TUI on it (spec §10, HOPPUS-68).
@@ -301,20 +282,63 @@ def open_(
     _launch_tui(vault)
 
 
-@app.command()
-def index() -> None:
+def _build_index_and_report(vault: str | None) -> None:
     """
-    Build the vault index (spec §10).
+    Build the selected vault's index and print a one-line summary.
+
+    Shared implementation of ``index`` and ``reindex`` (HOPPUS-99):
+    resolves the vault (explicit name or the configured default), runs a
+    full :meth:`hoppus.index.indexer.Index.build` scan, and reports the
+    note, link, and tag counts.
+
+    Args:
+        vault: Vault name, or None to use the configured default vault.
+
+    Raises:
+        typer.Exit: With code 1 if the Vaults Root is missing or no
+            vault can be resolved (HOPPUS-88).
     """
-    _stub("index")
+    config = _load_config_or_exit()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    selected = _select_vault(config, discovered, vaults_root, requested=vault)
+
+    built = Index.build(selected.path)
+    link_count = sum(len(links) for links in built.links.values())
+    typer.echo(
+        f"{selected.name}: indexed {len(built.notes_by_path)} note(s), "
+        f"{link_count} link(s), {len(built.tags)} tag(s)"
+    )
 
 
 @app.command()
-def reindex() -> None:
+def index(
+    vault: str = typer.Argument(
+        None, help="Vault name (default: the configured default vault)."
+    ),
+) -> None:
     """
-    Refresh the vault index (spec §10).
+    Build the vault index and print a summary (spec §10, HOPPUS-99).
+
+    Alias of ``reindex`` — the index is rebuilt from scratch either way.
     """
-    _stub("reindex")
+    _build_index_and_report(vault)
+
+
+@app.command()
+def reindex(
+    vault: str = typer.Argument(
+        None, help="Vault name (default: the configured default vault)."
+    ),
+) -> None:
+    """
+    Rebuild the vault index and print a summary (spec §10, HOPPUS-99).
+
+    Scans every note under the vault (skipping ``.obsidian/`` and
+    ``.hoppus/``), resolves all links, and reports the note, link, and
+    tag counts. Read-only — never writes to the vault.
+    """
+    _build_index_and_report(vault)
 
 
 @app.command()
@@ -332,9 +356,27 @@ def new(
     title: str = typer.Argument(None, help="Title of the note to create."),
 ) -> None:
     """
-    Create a note at the vault root (spec §10).
+    Create an empty note at the default vault's root (spec §10, §5.2,
+    HOPPUS-99).
+
+    The title is validated against the reserved-character rules
+    (spec §5.2) and collisions are refused — never silently overwritten.
+    Prints the created note's absolute path.
     """
-    _stub("new")
+    if title is None or not title.strip():
+        typer.secho("new requires a TITLE", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    config = _load_config_or_exit()
+    vaults_root = Path(config["vaults_root"]).expanduser()
+    discovered = _discover_or_exit(vaults_root)
+    selected = _select_vault(config, discovered, vaults_root)
+
+    try:
+        path = create_note(selected.path, title)
+    except (ValueError, FileExistsError, OSError) as error:
+        typer.secho(str(error), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(str(path))
 
 
 @app.command()
@@ -414,6 +456,29 @@ def _resolve_preview_note(
         raise typer.Exit(code=1) from error
 
 
+def _render_to_terminal(config: dict[str, Any], text: str) -> None:
+    """
+    Render a note's Markdown to the terminal (spec §9.5, HOPPUS-99).
+
+    Uses the same renderer stack as the TUI preview pane
+    (:mod:`hoppus.render.terminal`): ``glow`` when ``preview.renderer``
+    selects it *and* the binary is present (falling back on any glow
+    failure), otherwise the native OFM transform printed through Rich's
+    Markdown renderer.
+
+    Args:
+        config: The merged configuration mapping (spec §12).
+        text: The note's full Markdown text.
+    """
+    console = Console()
+    if select_renderer(config) == "glow":
+        rendered = render_glow(text)
+        if rendered is not None:
+            console.print(rendered)
+            return
+    console.print(Markdown(render_native(text)))
+
+
 @app.command()
 def preview(
     path: str = typer.Argument(
@@ -432,7 +497,7 @@ def preview(
 ) -> None:
     """
     Render a note to the terminal or the local browser (spec §10, §9.5,
-    HOPPUS-56, HOPPUS-72).
+    HOPPUS-56, HOPPUS-72, HOPPUS-99).
 
     PATH resolution order: if PATH exists as a file (absolute,
     ``~``-expanded, or relative to the current directory) it is used
@@ -440,35 +505,42 @@ def preview(
     path or title/alias) within the selected vault (``--vault`` or the
     configured default), matching ``audit``/MCP semantics.
 
+    Without ``--browser``, renders to the terminal using the same
+    renderer stack as the TUI preview pane (glow when configured and
+    installed, the native OFM transform otherwise).
+
     With ``--browser``, renders the note locally (markdown-it-py +
     Pygments, GitHub-like CSS) to a temp HTML file and opens it in the
     browser via a ``file://`` URL — no content ever leaves the machine.
     If ``preview.browser_renderer`` is ``go-grip`` and the binary is on
     the PATH, rendering is delegated to it instead; the Python ``grip``
-    package is never used. The terminal preview (without ``--browser``)
-    belongs to a later story and remains stubbed.
+    package is never used.
     """
-    if not browser:
-        _stub("preview")
     if path is None:
-        typer.secho("preview --browser requires a PATH", fg=typer.colors.RED, err=True)
+        typer.secho("preview requires a PATH", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     config = _load_config_or_exit()
     note = Path(path).expanduser()
     if not note.is_file():
         note = _resolve_preview_note(config, path, vault)
 
-    renderer = config.get("preview", {}).get("browser_renderer", "builtin")
-    if renderer == "go-grip" and go_grip_available():
-        launch_go_grip(note)
-        typer.echo(f"Rendering {note} with go-grip (localhost)")
-        return
+    if browser:
+        renderer = config.get("preview", {}).get("browser_renderer", "builtin")
+        if renderer == "go-grip" and go_grip_available():
+            launch_go_grip(note)
+            typer.echo(f"Rendering {note} with go-grip (localhost)")
+            return
 
     try:
         text = note.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         typer.secho(f"Cannot read {note}: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from error
+
+    if not browser:
+        _render_to_terminal(config, text)
+        return
+
     html_path = write_preview_html(text, title=note.stem)
     open_in_browser(html_path)
     typer.echo(str(html_path))
