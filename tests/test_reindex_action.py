@@ -44,10 +44,13 @@ def test_reindex_rebuilds_index_and_notifies(sample_vault: Path) -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
             await pilot.pause()
-            assert app._index is None
+            # The launch-time worker (HOPPUS-78) pre-populates the cache.
+            initial_index = app._index
+            assert initial_index is not None
             app.action_reindex()
             await pilot.pause()
             assert app._index is not None
+            assert app._index is not initial_index
             assert app._index_root == sample_vault
             assert sample_vault / "Index.md" in app._index.notes_by_path
             assert "Reindexed" in app.recorded_notifications

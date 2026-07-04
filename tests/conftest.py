@@ -23,9 +23,59 @@ Vault contents:
 - ``.obsidian/app.json`` — foreign Obsidian state that must stay untouched.
 """
 
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, AsyncIterator
 
 import pytest
+
+from hoppus.tui.app import HoppusApp
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """
+    Register the suite's custom markers.
+
+    :param config: pytest's config object.
+    """
+    config.addinivalue_line(
+        "markers",
+        "no_index_settle: do not wait for the launch-time index worker "
+        "inside HoppusApp.run_test (HOPPUS-78 mid-indexing tests)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def settle_initial_index(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Make ``HoppusApp.run_test`` wait for the launch-time index worker.
+
+    HOPPUS-78 moved the mount-time index build + audit into a thread
+    worker, so a bare ``run_test`` now yields *while indexing is still
+    in flight*. The suite's Pilot tests were written against the fully
+    launched state (problems count populated, watcher started), so this
+    autouse fixture settles that worker deterministically before each
+    test body runs. Tests that need to observe the mid-indexing state
+    opt out with ``@pytest.mark.no_index_settle``.
+    """
+    if request.node.get_closest_marker("no_index_settle"):
+        return
+    original_run_test = HoppusApp.run_test
+
+    @asynccontextmanager
+    async def settled_run_test(
+        self: HoppusApp, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        async with original_run_test(self, *args, **kwargs) as pilot:
+            if self._launch_worker is not None:
+                await self._launch_worker.wait()
+            await pilot.pause()
+            yield pilot
+
+    monkeypatch.setattr(HoppusApp, "run_test", settled_run_test)
+
 
 _INDEX_MD = """\
 ---

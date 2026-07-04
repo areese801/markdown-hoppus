@@ -165,7 +165,10 @@ def test_external_change_triggers_reindex(
         async with app.run_test() as pilot:
             await pilot.pause()
             assert app._watcher is not None
-            assert app._index is None
+            # The launch-time worker (HOPPUS-78) pre-populates the cache.
+            initial_index = app._index
+            assert initial_index is not None
+            assert vault / "Gamma.md" not in initial_index.notes_by_path
 
             gamma = vault / "Gamma.md"
             gamma.write_text("Gamma links to [[Alpha]].\n", encoding="utf-8")
@@ -173,6 +176,7 @@ def test_external_change_triggers_reindex(
             await pilot.pause()
 
             assert app._index is not None
+            assert app._index is not initial_index
             assert gamma in app._index.notes_by_path
             assert "Reindexed" in app.recorded_notifications
 
@@ -227,6 +231,7 @@ def test_self_write_does_not_trigger_reindex(
         async with app.run_test() as pilot:
             await pilot.pause()
             assert app._watcher is not None
+            initial_index = app._index
 
             alpha = vault / "Alpha.md"
             app._suppress_self_write(alpha)
@@ -234,7 +239,8 @@ def test_self_write_does_not_trigger_reindex(
             app._watcher._handle(alpha, "modified")
             await pilot.pause()
 
-            assert app._index is None
+            # No reindex fired: the launch-time cache is untouched.
+            assert app._index is initial_index
             assert "Reindexed" not in app.recorded_notifications
 
     asyncio.run(run())

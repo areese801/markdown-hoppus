@@ -35,12 +35,27 @@ from hoppus.render.terminal import (
 from hoppus.render.transclude import block_line, expand_embeds
 
 
+EMPTY_HINT = (
+    "No note open.\n\nPress ^o to open a note, or Enter on a file in the Explorer."
+)
+
+
 class PreviewPane(VerticalScroll):
     """
     The main preview pane: native Markdown, raw toggle, optional glow.
     """
 
     can_focus = True
+
+    DEFAULT_CSS = """
+    PreviewPane > #preview-empty {
+        width: 100%;
+        height: 100%;
+        content-align: center middle;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
 
     def __init__(self, config: dict[str, Any], *, id: str | None = None) -> None:
         """
@@ -75,12 +90,24 @@ class PreviewPane(VerticalScroll):
         """
         yield Markdown("", id="preview-markdown", open_links=False)
         yield Static("", id="preview-raw")
+        yield Static(EMPTY_HINT, id="preview-empty")
 
     def on_mount(self) -> None:
         """
-        Start with the (empty) rendered view visible.
+        Start with the empty-state hint visible (HOPPUS-78).
         """
         self.query_one("#preview-raw", Static).display = False
+        self._show_empty_hint(self.note_path is None)
+
+    def _show_empty_hint(self, visible: bool) -> None:
+        """
+        Show or hide the centered no-note-open placeholder (HOPPUS-78).
+
+        Args:
+            visible: True to show the hint (no active note), False to
+                hide it (a note is open).
+        """
+        self.query_one("#preview-empty", Static).display = visible
 
     # -- Rendering -----------------------------------------------------------
 
@@ -107,6 +134,7 @@ class PreviewPane(VerticalScroll):
             self._text = f"> ⚠ unreadable file: {summary}"
             note = Note(title=path.stem, path=path)
         self.note_path = path
+        self._show_empty_hint(False)
         await self._refresh_view()
         app = self.app
         if hasattr(app, "note_title"):
@@ -118,7 +146,8 @@ class PreviewPane(VerticalScroll):
         Reset the pane to the empty (no note) state.
 
         Clears the active note path and text, leaves raw mode off, empties
-        both the Markdown and raw views, and shows the (empty) rendered view.
+        both the Markdown and raw views, shows the (empty) rendered view,
+        and restores the no-note-open hint (HOPPUS-78).
         """
         self.note_path = None
         self.raw_mode = False
@@ -129,6 +158,7 @@ class PreviewPane(VerticalScroll):
         static.update("")
         self.query_one("#preview-markdown", Markdown).display = True
         static.display = False
+        self._show_empty_hint(True)
 
     async def toggle_raw(self) -> None:
         """

@@ -25,6 +25,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
+from textual.worker import Worker
 from textual.widgets import (
     DirectoryTree,
     Footer,
@@ -106,6 +107,7 @@ class StatusLine(Static):
         problems: int | None = None,
         char_count: int | None = None,
         index_error: str | None = None,
+        indexing: bool = False,
     ) -> None:
         """
         Re-render the status line from the app's reactive state.
@@ -123,6 +125,9 @@ class StatusLine(Static):
             index_error: Last index-build failure message (HOPPUS-69);
                 the ⚠ index error segment appears only when this is
                 set, so the string is unchanged for None.
+            indexing: True while the launch-time index build is still
+                running (HOPPUS-78); renders a transient ⟳ indexing…
+                segment, so the string is unchanged for False.
         """
         vault = vault_name or "(no vault)"
         title = note_title or "(no note)"
@@ -130,6 +135,8 @@ class StatusLine(Static):
         status = f" hoppus · {vault} · {title} · {words}"
         if char_count is not None:
             status += f" · {char_count} chars"
+        if indexing:
+            status += " · ⟳ indexing…"
         if problems:
             status += f" · ⚠ {problems} problems"
         if index_error:
@@ -231,6 +238,14 @@ class HoppusApp(App[None]):
         # Report-only integrity issue count for the status-line
         # "problems" indicator (spec §19 D1, HOPPUS-40).
         self._problem_count: int = 0
+        # True while the launch-time index build runs in its worker
+        # (HOPPUS-78): the status line shows ⟳ indexing… and
+        # index-dependent actions notify instead of blocking the UI.
+        self._indexing: bool = False
+        # Handle to the launch-time index worker so tests can await it
+        # deterministically (the DirectoryTree's perpetual _loader
+        # worker rules out ``workers.wait_for_complete``).
+        self._launch_worker: Worker[None] | None = None
         # Live watcher slot (spec §6.2/§8/D5, HOPPUS-77). Auto-started
         # on mount (and on vault switch) unless watcher.enabled is
         # false; self-writes route through _suppress_self_write so they
@@ -259,13 +274,22 @@ class HoppusApp(App[None]):
     def on_mount(self) -> None:
         """
         Apply keymap overrides from config and seed the status line.
+
+        The launch-time index build and integrity audit run in a thread
+        worker (HOPPUS-78) so first paint and the Explorer stay
+        responsive on large vaults; the status line shows ⟳ indexing…
+        until the worker completes. The live watcher (HOPPUS-77) is
+        started by the worker's completion callback so it can reuse the
+        freshly built index instead of blocking mount with its own.
         """
         self.set_keymap(resolve_keymap_overrides(self.config))
         self.vault_name = self.config.get("default_vault")
-        self._refresh_problems()
+        self._indexing = True
         self._refresh_status_line()
         self._refresh_bookmarks()
-        self._start_watcher()
+        self._launch_worker = self.run_worker(
+            self._initial_index_worker, thread=True, exclusive=False
+        )
 
     def on_unmount(self) -> None:
         """
@@ -327,7 +351,75 @@ class HoppusApp(App[None]):
             problems=self._problem_count,
             char_count=self.char_count,
             index_error=self._index_error,
+            indexing=self._indexing,
         )
+
+    def _initial_index_worker(self) -> None:
+        """
+        Launch-time index build + integrity audit, off the main thread
+        (HOPPUS-78).
+
+        Runs as a Textual thread worker so ``on_mount`` returns
+        immediately and the TUI stays responsive while a large vault
+        indexes. Never raises: the result (index, problem count, or the
+        build error) is handed back to the app thread via
+        :meth:`_finish_initial_index`.
+        """
+        vault_root = self._active_vault_path()
+        index: Index | None = None
+        count = 0
+        error: Exception | None = None
+        try:
+            if vault_root.is_dir():
+                index = Index.build(vault_root)
+                count = integrity.audit_vault(index).count
+        except Exception as exc:
+            index = None
+            count = 0
+            error = exc
+        try:
+            self.call_from_thread(
+                self._finish_initial_index, vault_root, index, count, error
+            )
+        except RuntimeError:
+            # The app shut down before the build finished; nothing to
+            # update.
+            self.log.error("Initial index build finished after shutdown")
+
+    def _finish_initial_index(
+        self,
+        vault_root: Path,
+        index: Index | None,
+        count: int,
+        error: Exception | None,
+    ) -> None:
+        """
+        Apply the launch-time index worker's result on the app thread.
+
+        Clears the ⟳ indexing… state, populates the shared index cache
+        (or surfaces the build failure per HOPPUS-69), pushes the
+        problems count to the status line, and finally starts the live
+        watcher (HOPPUS-77) so it can reuse the cached index.
+
+        Args:
+            vault_root: The vault root the worker indexed.
+            index: The built index, or None when the build failed or
+                there was no vault directory.
+            count: The integrity audit's problem count.
+            error: The build/audit failure, if any.
+        """
+        self._indexing = False
+        if error is not None:
+            self._problem_count = 0
+            self._report_index_error(error)
+        else:
+            if index is not None:
+                self._index = index
+                self._index_root = vault_root
+                self._index_error = None
+            self._problem_count = count
+        self._refresh_status_line()
+        self._start_watcher()
 
     def _refresh_problems(self) -> None:
         """
@@ -337,7 +429,11 @@ class HoppusApp(App[None]):
         vault's index and re-renders the status line with the count.
         Report-only: never prompts. Fully guarded — no active vault or
         a failed index build/audit resets the count to 0, never raises.
+        Skipped while the launch-time build is still running
+        (HOPPUS-78): the worker's completion populates the count.
         """
+        if self._indexing:
+            return
         count = 0
         try:
             vault_root = self._active_vault_path()
@@ -384,11 +480,20 @@ class HoppusApp(App[None]):
         error is cleared; on failure the cache is invalidated, the
         error is reported via :meth:`_report_index_error`, and None is
         returned so callers can bail out with the user already told
-        why (HOPPUS-69).
+        why (HOPPUS-69). While the launch-time build is still running
+        (HOPPUS-78), a gentle "indexing" notification is posted and
+        None returned instead of blocking the UI with a second build.
 
         Args:
             vault_root: The vault root to index.
         """
+        if self._indexing:
+            self.notify(
+                "Indexing the vault — one moment…",
+                severity="information",
+                timeout=3,
+            )
+            return None
         try:
             index = Index.build(vault_root)
         except Exception as error:
@@ -607,13 +712,19 @@ class HoppusApp(App[None]):
         vault_root = self._active_vault_path()
         if not vault_root.is_dir():
             return
-        try:
-            index = Index.build(vault_root)
-        except Exception as error:
-            # The reindex path surfaces build failures on demand; live
-            # watching simply stays off rather than crashing on mount.
-            self.log.error(f"Watcher index build failed: {error!r}")
-            return
+        if self._index is not None and self._index_root == vault_root:
+            # Reuse the launch-time build (HOPPUS-78) instead of
+            # blocking on a second one.
+            index = self._index
+        else:
+            try:
+                index = Index.build(vault_root)
+            except Exception as error:
+                # The reindex path surfaces build failures on demand;
+                # live watching simply stays off rather than crashing
+                # on mount.
+                self.log.error(f"Watcher index build failed: {error!r}")
+                return
         watcher = VaultWatcher(index, on_change=self._on_watcher_change)
         watcher.start()
         if not watcher.available:
