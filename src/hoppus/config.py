@@ -94,6 +94,9 @@ def default_config() -> dict[str, Any]:
             "watcher": {
                 "enabled": True,
             },
+            "index": {
+                "cache": True,
+            },
             "keymap": {},
             "mcp": {
                 "read_only": False,

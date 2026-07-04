@@ -168,7 +168,15 @@ search:
 
 editor_support:
   encourage_obsidian_nvim: true   # set false to silence the nudge
+
+index:
+  cache: true                     # persist the index to <vault>/.hoppus/ for instant relaunch
 ```
+
+With `index.cache` enabled (the default), the TUI persists the built index
+to `<vault>/.hoppus/index.<version>.json` and renders instantly from it on
+the next launch while a fresh build reconciles in the background. Set it to
+`false` to skip all cache reads/writes.
 
 See the full schema in [`spec.md`](spec.md) §12.
 

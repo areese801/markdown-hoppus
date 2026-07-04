@@ -50,6 +50,7 @@ from hoppus import (
     templates,
 )
 from hoppus.config import load_config
+from hoppus.index import cache as index_cache
 from hoppus.index.indexer import Index
 from hoppus.index.mentions import find_unlinked_mentions
 from hoppus.index.watcher import VaultWatcher
@@ -281,6 +282,14 @@ class HoppusApp(App[None]):
         # deterministically (the DirectoryTree's perpetual _loader
         # worker rules out ``workers.wait_for_complete``).
         self._launch_worker: Worker[None] | None = None
+        # Persistent index cache state (HOPPUS-79). _cache_provisional
+        # is True while the UI renders from a loaded .hoppus cache that
+        # the launch build has not yet reconciled; _cache_dirty marks
+        # in-memory index changes (hot-path reindex, manual rebuild)
+        # not yet persisted — flushed on shutdown and vault switch, so
+        # the cache is never rewritten per keystroke.
+        self._cache_provisional: bool = False
+        self._cache_dirty: bool = False
         # Armed-quit state (HOPPUS-93): a first ``q`` arms the quit and
         # starts a short expiry timer; a second ``q`` inside the window
         # exits. Any other key (or the timer) disarms.
@@ -318,24 +327,92 @@ class HoppusApp(App[None]):
         The launch-time index build and integrity audit run in a thread
         worker (HOPPUS-78) so first paint and the Explorer stay
         responsive on large vaults; the status line shows ⟳ indexing…
-        until the worker completes. The live watcher (HOPPUS-77) is
-        started by the worker's completion callback so it can reuse the
-        freshly built index instead of blocking mount with its own.
+        until the worker completes. When a persistent index cache
+        exists (HOPPUS-79), the UI renders from it immediately and the
+        worker's fresh build reconciles it in the background. The live
+        watcher (HOPPUS-77) is started by the worker's completion
+        callback so it can reuse the freshly built index instead of
+        blocking mount with its own.
         """
         self.set_keymap(resolve_keymap_overrides(self.config))
         self.vault_name = self.config.get("default_vault")
         self._indexing = True
+        self._load_index_cache()
         self._refresh_status_line()
         self._refresh_bookmarks()
+        if self._cache_provisional:
+            self._refresh_tags()
         self._launch_worker = self.run_worker(
             self._initial_index_worker, thread=True, exclusive=False
         )
 
     def on_unmount(self) -> None:
         """
-        Stop the live vault watcher when the app shuts down.
+        Stop the live vault watcher and persist the index cache on
+        shutdown (HOPPUS-77, HOPPUS-79).
         """
         self._stop_watcher()
+        self._flush_index_cache()
+
+    # -- Persistent index cache (HOPPUS-79) ------------------------------------
+
+    def _index_cache_enabled(self) -> bool:
+        """
+        Report whether the persistent index cache is enabled
+        (``index.cache``, default true).
+        """
+        section = self.config.get("index")
+        if not isinstance(section, dict):
+            return True
+        return bool(section.get("cache", True))
+
+    def _load_index_cache(self) -> None:
+        """
+        Seed the in-memory index from the vault's ``.hoppus`` cache
+        (HOPPUS-79).
+
+        Called on mount before the launch worker starts: when a valid
+        cache loads, the UI renders from it immediately and the app is
+        interactive at once, while the ⟳ indexing… segment stays lit
+        until the background build reconciles. The cached index is
+        provisional — never trusted as final — so the launch build
+        always still runs and swaps in the fresh result. A missing,
+        corrupt, or wrong-schema cache is a silent no-op (the normal
+        HOPPUS-78 launch flow applies), as is ``index.cache: false``.
+        """
+        if not self._index_cache_enabled():
+            return
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            return
+        cached = index_cache.load_index(vault_root)
+        if cached is None:
+            return
+        self._index = cached
+        self._index_root = vault_root
+        self._cache_provisional = True
+
+    def _flush_index_cache(self) -> None:
+        """
+        Persist the in-memory index to the vault cache if it is dirty.
+
+        The save point for incremental changes (hot-path reindex,
+        manual rebuild): runs on clean shutdown and before a vault
+        switch so the next launch starts from fresh data. Skipped when
+        caching is disabled, nothing changed, the index is cold, or
+        the current index is still an unreconciled provisional cache
+        (never re-persist possibly-stale data).
+        """
+        if (
+            not self._index_cache_enabled()
+            or not self._cache_dirty
+            or self._cache_provisional
+            or self._index is None
+            or self._index_root is None
+        ):
+            return
+        index_cache.save_index(self._index, self._index_root)
+        self._cache_dirty = False
 
     # -- File Explorer -------------------------------------------------------
 
@@ -418,6 +495,10 @@ class HoppusApp(App[None]):
             index = None
             report = None
             error = exc
+        if index is not None and self._index_cache_enabled():
+            # Persist the fresh index off the main thread (HOPPUS-79)
+            # so the next launch renders instantly from cache.
+            index_cache.save_index(index, vault_root)
         try:
             self.call_from_thread(
                 self._finish_initial_index, vault_root, index, report, error
@@ -451,17 +532,26 @@ class HoppusApp(App[None]):
             error: The build/audit failure, if any.
         """
         self._indexing = False
+        was_provisional = self._cache_provisional
         if error is not None:
             self._set_problem_report(None)
             self._report_index_error(error)
         else:
             if index is not None:
+                # Atomic swap (HOPPUS-79): the fresh build replaces any
+                # provisional cached index in one assignment; the cache
+                # file was already rewritten by the worker.
                 self._index = index
                 self._index_root = vault_root
                 self._index_error = None
+                self._cache_provisional = False
+                self._cache_dirty = False
             self._set_problem_report(report)
         self._refresh_status_line()
-        self._refresh_tags()
+        if was_provisional and index is not None:
+            self._refresh_index_ui(vault_root, index)
+        else:
+            self._refresh_tags()
         self._start_watcher()
 
     def _set_problem_report(self, report: "integrity.AuditReport | None") -> None:
@@ -614,6 +704,10 @@ class HoppusApp(App[None]):
         self._index = index
         self._index_root = vault_root
         self._index_error = None
+        # A fresh full build supersedes any provisional cached index
+        # and is worth persisting at the next save point (HOPPUS-79).
+        self._cache_provisional = False
+        self._cache_dirty = True
         return index
 
     def watch_vault_name(self) -> None:
@@ -736,6 +830,7 @@ class HoppusApp(App[None]):
             self._report_index_error(error)
             return None
         self._index_error = None
+        self._cache_dirty = True
         self._update_problems_for(index, affected)
         self._refresh_index_ui(vault_root, index)
         return index
@@ -1969,6 +2064,7 @@ class HoppusApp(App[None]):
             self.notify(f"Vault not found: {name}", severity="warning", timeout=3)
             return
         self._stop_watcher()
+        self._flush_index_cache()
         self.vault_name = name
 
         explorer = self.query_one("#explorer-pane", ExplorerPane)
@@ -1980,6 +2076,8 @@ class HoppusApp(App[None]):
         preview.vault_root = vault_path
         self._index = None
         self._index_root = None
+        self._cache_provisional = False
+        self._cache_dirty = False
         self.query_one("#backlinks-pane", BacklinksPane).clear()
         self.note_title = None
         self.note_relpath = None
