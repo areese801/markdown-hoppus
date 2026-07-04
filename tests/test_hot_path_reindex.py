@@ -243,7 +243,7 @@ def test_watcher_event_during_backlink_selection_is_safe(
                 str(pane.get_option_at_index(index).prompt)
                 for index in range(pane.option_count)
             }
-            assert prompts == {"Beta", "Gamma"}
+            assert prompts == {"Beta  ·1", "Gamma  ·1"}
 
     asyncio.run(run())
 

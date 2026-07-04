@@ -5,7 +5,8 @@ Renders natively by default (Textual ``Markdown`` fed by
 ``render_native``), through ``glow`` when configured *and* installed, and
 falls back to a raw Rich ``Syntax`` view — either on demand (raw toggle)
 or automatically when native rendering fails. ``set_note`` also pushes
-the note title and word count into the app's reactive status-line state.
+the note title, vault-relative path (HOPPUS-95), and word count into
+the app's reactive status-line state.
 
 Link resolution for clicked ``hoppus://`` links happens here too: the
 pane lazily builds an ``Index`` for its ``vault_root`` and resolves a
@@ -99,6 +100,26 @@ class PreviewPane(VerticalScroll):
         self.query_one("#preview-raw", Static).display = False
         self._show_empty_hint(self.note_path is None)
 
+    def _relative_display(self, path: Path) -> str:
+        """
+        Render a note path relative to the vault root for the status
+        line (HOPPUS-95).
+
+        Args:
+            path: The note's absolute path.
+
+        Returns:
+            The vault-relative path with POSIX separators, or the bare
+            filename when no vault root is set or the note lies outside
+            it.
+        """
+        if self._vault_root is not None:
+            try:
+                return path.relative_to(self._vault_root).as_posix()
+            except ValueError:
+                pass
+        return path.name
+
     def _show_empty_hint(self, visible: bool) -> None:
         """
         Show or hide the centered no-note-open placeholder (HOPPUS-78).
@@ -140,6 +161,8 @@ class PreviewPane(VerticalScroll):
         if hasattr(app, "note_title"):
             app.note_title = note.title
             app.word_count = note.word_count
+        if hasattr(app, "note_relpath"):
+            app.note_relpath = self._relative_display(path)
 
     async def clear(self) -> None:
         """
@@ -153,6 +176,8 @@ class PreviewPane(VerticalScroll):
         self.raw_mode = False
         self._text = ""
         self._rendered = None
+        if hasattr(self.app, "note_relpath"):
+            self.app.note_relpath = None
         await self.query_one("#preview-markdown", Markdown).update("")
         static = self.query_one("#preview-raw", Static)
         static.update("")

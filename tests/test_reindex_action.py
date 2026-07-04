@@ -88,7 +88,7 @@ def test_reindex_picks_up_external_changes(tmp_path: Path) -> None:
                 str(pane.get_option_at_index(index).prompt)
                 for index in range(pane.option_count)
             ]
-            assert prompts == ["Beta"]
+            assert prompts == ["Beta  ·1"]
 
     asyncio.run(run())
 

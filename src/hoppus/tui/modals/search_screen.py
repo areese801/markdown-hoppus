@@ -60,17 +60,27 @@ class SearchScreen(ModalScreen[SearchResult | None]):
     }
     """
 
-    def __init__(self, index: Index, vault_root: Path, backend: str = "auto") -> None:
+    def __init__(
+        self,
+        index: Index,
+        vault_root: Path,
+        backend: str = "auto",
+        initial_query: str = "",
+    ) -> None:
         """
         Args:
             index: A built vault index to search.
             vault_root: The vault root, for rendering relative paths.
             backend: Content-search backend (``search.content_backend``).
+            initial_query: Optional query to pre-fill and execute on
+                mount (e.g. ``tag:<name>`` from the Tags pane,
+                HOPPUS-98).
         """
         super().__init__()
         self._index = index
         self._vault_root = vault_root
         self._backend = backend
+        self._initial_query = initial_query
         self._results: list[SearchResult] = []
 
     def compose(self) -> ComposeResult:
@@ -86,9 +96,14 @@ class SearchScreen(ModalScreen[SearchResult | None]):
 
     def on_mount(self) -> None:
         """
-        Focus the input; the list starts empty until a query is typed.
+        Focus the input; a non-empty ``initial_query`` is pre-filled
+        and executed immediately, otherwise the list starts empty.
         """
-        self.query_one("#search-input", Input).focus()
+        input_widget = self.query_one("#search-input", Input)
+        if self._initial_query:
+            input_widget.value = self._initial_query
+            self.update_results(self._initial_query)
+        input_widget.focus()
 
     # -- Searching -----------------------------------------------------------
 

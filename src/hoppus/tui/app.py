@@ -4,12 +4,12 @@ The Textual App: three-region layout, keymap, and status line (spec §9.1).
 Regions: a tabbed left sidebar (Explorer · Tags · Bookmarks), a main pane
 hosting the note preview (spec §9.5), and a toggleable right sidebar
 (Backlinks). A header/status line shows the current vault name, active
-note title, and word count; a footer shows key hints. The Explorer tab
-hosts the File Explorer tree (spec §9.2), the Bookmarks tab lists
-starred notes (spec §9.12); the remaining sidebar tabs are
-placeholders until their stories land. The keymap
-defaults come from spec §9.16 and are remappable via the ``keymap``
-config section (see ``hoppus.tui.keymap``).
+note title, its vault-relative path (HOPPUS-95), and word count; a
+footer shows key hints. The Explorer tab hosts the File Explorer tree
+(spec §9.2), the Tags tab lists the vault's tags with counts
+(HOPPUS-98), and the Bookmarks tab lists starred notes (spec §9.12).
+The keymap defaults come from spec §9.16 and are remappable via the
+``keymap`` config section (see ``hoppus.tui.keymap``).
 """
 
 import os
@@ -82,6 +82,7 @@ from hoppus.tui.panes.backlinks import BacklinksPane
 from hoppus.tui.panes.bookmarks import BookmarksPane
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
+from hoppus.tui.panes.tags import TagsPane
 from hoppus.vault import discover_vaults
 
 #: How long a single ``q`` stays armed before the quit intent expires
@@ -89,27 +90,36 @@ from hoppus.vault import discover_vaults
 QUIT_CONFIRM_SECONDS = 2.0
 
 
-class PanePlaceholder(Static):
-    """
-    A focusable, clearly-labeled placeholder for a not-yet-built pane.
-    """
+#: Longest vault-relative path shown verbatim in the status line
+#: (HOPPUS-95); longer paths are elided from the left so the filename
+#: (the most identifying part) always survives in narrow terminals.
+MAX_STATUS_PATH_CHARS = 48
 
-    can_focus = True
 
-    def __init__(self, label: str, *, id: str | None = None) -> None:
-        """
-        Args:
-            label: The pane name to show in the placeholder text.
-            id: Optional widget id.
-        """
-        super().__init__(
-            f"[dim]PLACEHOLDER — {label} (coming in a later story)[/dim]", id=id
-        )
+def elide_path(path: str, max_chars: int = MAX_STATUS_PATH_CHARS) -> str:
+    """
+    Elide a vault-relative path for the status line (HOPPUS-95).
+
+    Keeps the trailing ``max_chars - 1`` characters behind a leading
+    ``…`` so deep paths never crowd the other status segments — the
+    tail (folder + filename) is what identifies the note.
+
+    Args:
+        path: The vault-relative path (POSIX separators).
+        max_chars: Maximum rendered length, including the ellipsis.
+
+    Returns:
+        The path unchanged when it fits, else the elided tail.
+    """
+    if len(path) <= max_chars:
+        return path
+    return "…" + path[-(max_chars - 1) :]
 
 
 class StatusLine(Static):
     """
-    Header/status line: current vault name, note title, and word count.
+    Header/status line: current vault name, note title, vault-relative
+    note path (HOPPUS-95), and word count.
     """
 
     def update_status(
@@ -121,6 +131,7 @@ class StatusLine(Static):
         char_count: int | None = None,
         index_error: str | None = None,
         indexing: bool = False,
+        note_path: str | None = None,
     ) -> None:
         """
         Re-render the status line from the app's reactive state.
@@ -141,11 +152,18 @@ class StatusLine(Static):
             indexing: True while the launch-time index build is still
                 running (HOPPUS-78); renders a transient ⟳ indexing…
                 segment, so the string is unchanged for False.
+            note_path: Active note's vault-relative path (HOPPUS-95);
+                the path segment appears only when this is set (elided
+                per :func:`elide_path`), so the string is unchanged
+                for None.
         """
         vault = vault_name or "(no vault)"
         title = note_title or "(no note)"
         words = "– words" if word_count is None else f"{word_count} words"
-        status = f" hoppus · {vault} · {title} · {words}"
+        status = f" hoppus · {vault} · {title}"
+        if note_path:
+            status += f" · {elide_path(note_path)}"
+        status += f" · {words}"
         if char_count is not None:
             status += f" · {char_count} chars"
         if indexing:
@@ -207,13 +225,11 @@ class HoppusApp(App[None]):
         height: 1fr;
         border: none;
     }
-    PanePlaceholder:focus {
-        background: $boost;
-    }
     """
 
     vault_name: reactive[str | None] = reactive(None)
     note_title: reactive[str | None] = reactive(None)
+    note_relpath: reactive[str | None] = reactive(None)
     word_count: reactive[int | None] = reactive(None)
     char_count: reactive[int | None] = reactive(None)
 
@@ -286,7 +302,7 @@ class HoppusApp(App[None]):
                 with TabPane("Explorer", id="tab-explorer"):
                     yield ExplorerPane(self._active_vault_path(), id="explorer-pane")
                 with TabPane("Tags", id="tab-tags"):
-                    yield PanePlaceholder("Tag pane", id="tags-placeholder")
+                    yield TagsPane(id="tags-pane")
                 with TabPane("Bookmarks", id="tab-bookmarks"):
                     yield BookmarksPane(id="bookmarks-pane")
             yield PreviewPane(self.config, id="main-pane")
@@ -376,6 +392,7 @@ class HoppusApp(App[None]):
             char_count=self.char_count,
             index_error=self._index_error,
             indexing=self._indexing,
+            note_path=self.note_relpath,
         )
 
     def _initial_index_worker(self) -> None:
@@ -444,6 +461,7 @@ class HoppusApp(App[None]):
                 self._index_error = None
             self._set_problem_report(report)
         self._refresh_status_line()
+        self._refresh_tags()
         self._start_watcher()
 
     def _set_problem_report(self, report: "integrity.AuditReport | None") -> None:
@@ -606,6 +624,10 @@ class HoppusApp(App[None]):
         """React to active-note changes."""
         self._refresh_status_line()
 
+    def watch_note_relpath(self) -> None:
+        """React to active-note path changes (HOPPUS-95)."""
+        self._refresh_status_line()
+
     def watch_word_count(self) -> None:
         """React to word-count changes."""
         self._refresh_status_line()
@@ -723,9 +745,10 @@ class HoppusApp(App[None]):
         Refresh the index-derived panes after any index change.
 
         Repopulates the open note's backlinks (the pane itself defers
-        the rebuild while a selection is mid-dispatch, HOPPUS-86) and
-        schedules an Explorer tree reload so filesystem changes appear
-        without a restart (HOPPUS-90).
+        the rebuild while a selection is mid-dispatch, HOPPUS-86),
+        repopulates the Tags pane (HOPPUS-98), and schedules an
+        Explorer tree reload so filesystem changes appear without a
+        restart (HOPPUS-90).
 
         Args:
             vault_root: The active vault root.
@@ -739,6 +762,10 @@ class HoppusApp(App[None]):
                 pane = None
             if pane is not None:
                 pane.show_backlinks(Path(note_path), index, vault_root)
+        try:
+            self.query_one("#tags-pane", TagsPane).show_tags(index)
+        except Exception:
+            self.log.error("Failed to refresh tags pane")
         self._reload_explorer()
 
     def _reload_explorer(self) -> None:
@@ -1104,10 +1131,19 @@ class HoppusApp(App[None]):
         )
         sections.append(
             (
-                "Backlinks & Bookmarks lists (focused)",
+                "Backlinks list (focused)",
                 [
                     (display_key(binding.key), binding.description)
                     for binding in BacklinksPane.BINDINGS
+                ],
+            )
+        )
+        sections.append(
+            (
+                "Bookmarks & Tags lists (focused)",
+                [
+                    (display_key(binding.key), binding.description)
+                    for binding in BookmarksPane.BINDINGS
                 ],
             )
         )
@@ -1147,12 +1183,17 @@ class HoppusApp(App[None]):
 
         self.push_screen(QuickSwitcherModal(index, vault_root), handle_result)
 
-    def action_search(self) -> None:
+    def action_search(self, initial_query: str = "") -> None:
         """
         Open the in-TUI search screen (spec §9.8, HOPPUS-44).
 
         Live fuzzy search over titles and content with targeted
-        operators; Enter opens the chosen note in the preview.
+        operators; Enter opens the chosen note in the preview. The Tags
+        pane routes through here with a pre-filled ``tag:<name>`` query
+        (HOPPUS-98).
+
+        Args:
+            initial_query: Optional query to pre-fill and execute.
         """
         vault_root = self._active_vault_path()
         index = self._active_index(vault_root)
@@ -1166,7 +1207,10 @@ class HoppusApp(App[None]):
             await self.open_note(result.path, vault_root=vault_root)
 
         self.push_screen(
-            SearchScreen(index, vault_root, backend=backend), handle_result
+            SearchScreen(
+                index, vault_root, backend=backend, initial_query=initial_query
+            ),
+            handle_result,
         )
 
     def action_open_editor(self) -> None:
@@ -1723,6 +1767,35 @@ class HoppusApp(App[None]):
         except Exception:
             self.log.error("Failed to refresh bookmarks pane")
 
+    def _refresh_tags(self) -> None:
+        """
+        Repopulate the Tags pane from the vault index (HOPPUS-98).
+
+        Fully guarded: a missing pane, missing vault, or failed index
+        build never raises — the pane is cleared or left as-is. Reuses
+        the cached index when it matches but never populates the cache
+        (mirroring :meth:`_refresh_bookmarks`, so lazy pane refreshes
+        don't change the app's indexing behavior under test). Hot-path
+        index changes refresh the pane through
+        :meth:`_refresh_index_ui` instead, reusing the updated index.
+        """
+        try:
+            pane = self.query_one("#tags-pane", TagsPane)
+        except Exception:
+            return
+        try:
+            vault_root = self._active_vault_path()
+            if not vault_root.is_dir():
+                pane.clear()
+                return
+            if self._index is not None and self._index_root == vault_root:
+                index = self._index
+            else:
+                index = Index.build(vault_root)
+            pane.show_tags(index)
+        except Exception:
+            self.log.error("Failed to refresh tags pane")
+
     def action_toggle_star(self) -> None:
         """
         Star or unstar the active note (spec §9.12, HOPPUS-52, key ``s``).
@@ -1909,8 +1982,10 @@ class HoppusApp(App[None]):
         self._index_root = None
         self.query_one("#backlinks-pane", BacklinksPane).clear()
         self.note_title = None
+        self.note_relpath = None
         self.word_count = None
         self.char_count = None
         self._refresh_problems()
         self._refresh_bookmarks()
+        self._refresh_tags()
         self._start_watcher()
