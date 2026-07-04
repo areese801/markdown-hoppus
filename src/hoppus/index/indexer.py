@@ -198,7 +198,7 @@ class Index:
         index._rebuild_backlinks()
         return index
 
-    def reindex_file(self, path: Path) -> None:
+    def reindex_file(self, path: Path) -> set[Path]:
         """
         Incrementally re-index a single ``.md`` file (spec §8).
 
@@ -214,8 +214,14 @@ class Index:
         a content-less stub note instead of raising (HOPPUS-73).
 
         :param path: Path to the ``.md`` file that changed.
+        :returns: The set of note paths whose parse or link resolution
+            was recomputed — the changed file itself plus every source
+            note with a re-resolved link, so callers can refresh
+            derived state (e.g. per-note audit counts, HOPPUS-84) for
+            exactly the notes this change could have touched.
         """
         path = Path(path)
+        affected: set[Path] = {path}
         affected_names: set[str] = set()
         old_note = self.notes_by_path.get(path)
         if old_note is not None:
@@ -243,7 +249,9 @@ class Index:
                     or _target_tail(link.target) in affected_names
                 ):
                     resolver.resolve(link, current)
+                    affected.add(source)
         self._rebuild_backlinks()
+        return affected
 
     def _make_resolver(self) -> Resolver:
         """

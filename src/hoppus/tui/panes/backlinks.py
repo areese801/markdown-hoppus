@@ -41,6 +41,13 @@ class BacklinksPane(OptionList):
         # Option ids of the appended unlinked-mentions section (HOPPUS-33),
         # so re-running the action replaces the section instead of stacking.
         self._unlinked_ids: list[str] = []
+        # True while a selection is being dispatched (HOPPUS-86): a
+        # watcher-triggered refresh mid-selection must not clear the
+        # options out from under Textual's OptionList machinery, so
+        # refreshes arriving in that window are stashed in ``_pending``
+        # and applied once the dispatch completes (last one wins).
+        self._dispatching = False
+        self._pending: tuple[Path, Index, Path] | None = None
 
     def on_mount(self) -> None:
         """
@@ -57,11 +64,19 @@ class BacklinksPane(OptionList):
         note's title (falling back to its file stem), sorted
         case-insensitively. Shows an empty state when there are none.
 
+        While a selection is mid-dispatch the rebuild is deferred until
+        the dispatch completes (HOPPUS-86): clearing the options under
+        an in-flight ``OptionSelected`` crashes Textual's OptionList,
+        and a watcher event can land exactly there.
+
         Args:
             note_path: Path of the active note.
             index: The active vault's index.
             vault_root: Vault root, stored for later navigation.
         """
+        if self._dispatching:
+            self._pending = (Path(note_path), index, Path(vault_root))
+            return
         self._vault_root = Path(vault_root)
         self._paths = {}
         self._unlinked_ids = []
@@ -143,6 +158,12 @@ class BacklinksPane(OptionList):
     ) -> None:
         """
         Navigate to the selected backlink source via the app's funnel.
+
+        The pane is marked as dispatching for the duration so that a
+        refresh arriving mid-navigation (e.g. from a live watcher
+        event, HOPPUS-86) is deferred instead of clearing the options
+        under this in-flight selection; the latest deferred refresh is
+        applied afterwards.
         """
         event.stop()
         path = self._paths.get(event.option.id or "")
@@ -151,4 +172,11 @@ class BacklinksPane(OptionList):
         open_note = getattr(self.app, "open_note", None)
         if open_note is None:
             return
-        await open_note(path, vault_root=self._vault_root)
+        self._dispatching = True
+        try:
+            await open_note(path, vault_root=self._vault_root)
+        finally:
+            self._dispatching = False
+            pending, self._pending = self._pending, None
+            if pending is not None:
+                self.show_backlinks(*pending)

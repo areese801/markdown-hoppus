@@ -128,10 +128,12 @@ class ExplorerPane(DirectoryTree):
 
     async def _refresh_after_change(self) -> None:
         """
-        Rebuild the vault index and reload the tree after a CRUD op.
+        Rebuild the vault index after a CRUD op.
+
+        The shared refresh path (``action_reindex``) also reloads this
+        tree (HOPPUS-90), so no separate reload happens here.
         """
         self._hoppus.action_reindex()
-        await self.reload()
 
     def _prompt_before_link_update(self) -> bool:
         """

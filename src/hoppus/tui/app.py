@@ -238,6 +238,12 @@ class HoppusApp(App[None]):
         # Report-only integrity issue count for the status-line
         # "problems" indicator (spec §19 D1, HOPPUS-40).
         self._problem_count: int = 0
+        # Per-note issue counts backing _problem_count (HOPPUS-84):
+        # populated by the full audit on the launch worker (and the
+        # cold-path _refresh_problems), then maintained incrementally
+        # by _update_problems_for so hot paths never re-audit the
+        # whole vault. Only notes with a nonzero count are stored.
+        self._note_problems: dict[Path, int] = {}
         # True while the launch-time index build runs in its worker
         # (HOPPUS-78): the status line shows ⟳ indexing… and
         # index-dependent actions notify instead of blocking the UI.
@@ -367,19 +373,19 @@ class HoppusApp(App[None]):
         """
         vault_root = self._active_vault_path()
         index: Index | None = None
-        count = 0
+        report: integrity.AuditReport | None = None
         error: Exception | None = None
         try:
             if vault_root.is_dir():
                 index = Index.build(vault_root)
-                count = integrity.audit_vault(index).count
+                report = integrity.audit_vault(index)
         except Exception as exc:
             index = None
-            count = 0
+            report = None
             error = exc
         try:
             self.call_from_thread(
-                self._finish_initial_index, vault_root, index, count, error
+                self._finish_initial_index, vault_root, index, report, error
             )
         except RuntimeError:
             # The app shut down before the build finished; nothing to
@@ -390,43 +396,111 @@ class HoppusApp(App[None]):
         self,
         vault_root: Path,
         index: Index | None,
-        count: int,
+        report: "integrity.AuditReport | None",
         error: Exception | None,
     ) -> None:
         """
         Apply the launch-time index worker's result on the app thread.
 
         Clears the ⟳ indexing… state, populates the shared index cache
-        (or surfaces the build failure per HOPPUS-69), pushes the
-        problems count to the status line, and finally starts the live
-        watcher (HOPPUS-77) so it can reuse the cached index.
+        (or surfaces the build failure per HOPPUS-69), seeds the
+        per-note problem counts from the launch audit (HOPPUS-84) and
+        pushes the total to the status line, and finally starts the
+        live watcher (HOPPUS-77) so it can reuse the cached index.
 
         Args:
             vault_root: The vault root the worker indexed.
             index: The built index, or None when the build failed or
                 there was no vault directory.
-            count: The integrity audit's problem count.
+            report: The integrity audit's report, or None on failure.
             error: The build/audit failure, if any.
         """
         self._indexing = False
         if error is not None:
-            self._problem_count = 0
+            self._set_problem_report(None)
             self._report_index_error(error)
         else:
             if index is not None:
                 self._index = index
                 self._index_root = vault_root
                 self._index_error = None
-            self._problem_count = count
+            self._set_problem_report(report)
         self._refresh_status_line()
         self._start_watcher()
 
+    def _set_problem_report(self, report: "integrity.AuditReport | None") -> None:
+        """
+        Replace the per-note problem counts from a full audit report.
+
+        The report is the single source of truth for the ⚠ N problems
+        indicator right after a full audit; subsequent incremental
+        updates fold into these counts via :meth:`_update_problems_for`
+        (HOPPUS-84).
+
+        Args:
+            report: The full-vault audit report, or None to reset the
+                counts to zero (no vault / failed audit).
+        """
+        counts: dict[Path, int] = {}
+        if report is not None:
+            for issue in report.issues:
+                counts[issue.note_path] = counts.get(issue.note_path, 0) + 1
+        self._note_problems = counts
+        self._problem_count = sum(counts.values())
+
+    def _update_problems_for(self, index: Index, affected: set[Path]) -> None:
+        """
+        Incrementally re-audit only the notes an index change touched
+        (HOPPUS-84).
+
+        Re-runs the per-note audit for each affected source and folds
+        the counts into the cached per-note map, so the ⚠ N problems
+        indicator stays correct without the O(vault) full audit on hot
+        paths (editor return, watcher events, programmatic writes).
+        Never raises: an unreadable note counts as one problem
+        (matching :func:`hoppus.integrity.audit_vault`) and any other
+        per-note audit failure leaves that note's count unchanged.
+
+        Args:
+            index: The up-to-date cached index.
+            affected: The note paths whose content or link resolution
+                changed (from :meth:`Index.reindex_file`).
+        """
+        resolver = index._make_resolver()
+        for source in affected:
+            if source not in index.notes_by_path:
+                self._note_problems.pop(source, None)
+                continue
+            try:
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                count = 1
+            else:
+                try:
+                    count = len(
+                        integrity.audit_note(text, index, source, resolver=resolver)
+                    )
+                except Exception:
+                    self.log.error(f"Incremental audit failed for {source}")
+                    continue
+            if count:
+                self._note_problems[source] = count
+            else:
+                self._note_problems.pop(source, None)
+        self._problem_count = sum(self._note_problems.values())
+        self._refresh_status_line()
+
     def _refresh_problems(self) -> None:
         """
-        Recompute the report-only "problems" count (spec §19 D1).
+        Recompute the report-only "problems" count with a full audit
+        (spec §19 D1).
 
         Runs :func:`hoppus.integrity.audit_vault` over the active
         vault's index and re-renders the status line with the count.
+        This is O(vault), so it belongs on cold paths only — manual
+        reindex (``r``) and vault switch; the hot paths (note open,
+        editor return, watcher events) keep the count correct
+        incrementally via :meth:`_update_problems_for` (HOPPUS-84).
         Report-only: never prompts. Fully guarded — no active vault or
         a failed index build/audit resets the count to 0, never raises.
         Skipped while the launch-time build is still running
@@ -434,7 +508,7 @@ class HoppusApp(App[None]):
         """
         if self._indexing:
             return
-        count = 0
+        report: integrity.AuditReport | None = None
         try:
             vault_root = self._active_vault_path()
             if vault_root.is_dir():
@@ -445,12 +519,12 @@ class HoppusApp(App[None]):
                     index = self._index
                 else:
                     index = Index.build(vault_root)
-                count = integrity.audit_vault(index).count
+                report = integrity.audit_vault(index)
                 self._index_error = None
         except Exception as error:
-            count = 0
+            report = None
             self._report_index_error(error)
-        self._problem_count = count
+        self._set_problem_report(report)
         self._refresh_status_line()
 
     def _report_index_error(self, error: Exception) -> None:
@@ -533,6 +607,11 @@ class HoppusApp(App[None]):
         """
         Show a note in the preview pane.
 
+        A hot path (HOPPUS-84): opening a note touches only the opened
+        file and the cached index — it never runs the O(vault) full
+        audit. The ⚠ N problems count is seeded by the launch worker
+        (HOPPUS-78) and kept correct incrementally as files change.
+
         Args:
             path: Path to the ``.md`` note.
             vault_root: Optional vault root for resolving clicked links;
@@ -553,10 +632,9 @@ class HoppusApp(App[None]):
                 self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
                     path, index, root
                 )
-        self._refresh_problems()
         # D1 gate: opening a note is a report-only trigger by default —
-        # the indicator above is the only surface. Only the escape hatch
-        # (link_integrity.prompt_on = "always") may prompt here.
+        # the status-line indicator is the only surface. Only the escape
+        # hatch (link_integrity.prompt_on = "always") may prompt here.
         if integrity.should_prompt_on(self.config, "open"):
             self.run_worker(self._run_integrity_pass(path), exclusive=False)
 
@@ -575,6 +653,89 @@ class HoppusApp(App[None]):
         if self._index is not None and self._index_root == vault_root:
             return self._index
         return self._build_index(vault_root)
+
+    def _apply_note_change(self, vault_root: Path, *paths: Path) -> Index | None:
+        """
+        Fold changed files into the cached index incrementally and
+        refresh the affected UI (HOPPUS-84/85/86).
+
+        The one shared hot-path updater behind editor return, live
+        watcher events, and programmatic note mutations (new, daily,
+        template, capture, link): applies ``Index.reindex_file`` per
+        path to the cached index — falling back to a single full build
+        only when the cache is cold — re-audits just the affected
+        notes, refreshes the open note's backlinks, and reloads the
+        Explorer so created/renamed/deleted notes surface without a
+        restart (HOPPUS-90). Never a whole-vault rebuild or full audit
+        when the cache is warm.
+
+        Args:
+            vault_root: The active vault root.
+            paths: Every changed ``.md`` file to fold in.
+
+        Returns:
+            The updated index, or None when the update failed (the
+            error already surfaced per HOPPUS-69, or the launch build
+            is still in flight per HOPPUS-78).
+        """
+        if self._index is None or self._index_root != vault_root:
+            index = self._build_index(vault_root)
+            if index is None:
+                return None
+            self._refresh_problems()
+            self._refresh_index_ui(vault_root, index)
+            return index
+        index = self._index
+        affected: set[Path] = set()
+        try:
+            for path in paths:
+                affected |= index.reindex_file(Path(path))
+        except Exception as error:
+            self._index = None
+            self._index_root = None
+            self._report_index_error(error)
+            return None
+        self._index_error = None
+        self._update_problems_for(index, affected)
+        self._refresh_index_ui(vault_root, index)
+        return index
+
+    def _refresh_index_ui(self, vault_root: Path, index: Index) -> None:
+        """
+        Refresh the index-derived panes after any index change.
+
+        Repopulates the open note's backlinks (the pane itself defers
+        the rebuild while a selection is mid-dispatch, HOPPUS-86) and
+        schedules an Explorer tree reload so filesystem changes appear
+        without a restart (HOPPUS-90).
+
+        Args:
+            vault_root: The active vault root.
+            index: The up-to-date index.
+        """
+        note_path = self.preview.note_path
+        if note_path is not None:
+            try:
+                pane = self.query_one("#backlinks-pane", BacklinksPane)
+            except Exception:
+                pane = None
+            if pane is not None:
+                pane.show_backlinks(Path(note_path), index, vault_root)
+        self._reload_explorer()
+
+    def _reload_explorer(self) -> None:
+        """
+        Schedule a File Explorer tree reload on the message pump.
+
+        Deferred via ``call_later`` so a reload triggered from inside
+        another message handler never reworks the tree mid-dispatch;
+        fully guarded — a missing pane is a no-op.
+        """
+        try:
+            explorer = self.query_one("#explorer-pane", ExplorerPane)
+        except Exception:
+            return
+        self.call_later(explorer.reload)
 
     def action_unlinked_mentions(self) -> None:
         """
@@ -725,7 +886,13 @@ class HoppusApp(App[None]):
                 # on mount.
                 self.log.error(f"Watcher index build failed: {error!r}")
                 return
-        watcher = VaultWatcher(index, on_change=self._on_watcher_change)
+        # apply_changes=False: the observer thread only filters and
+        # debounces; the incremental index update happens on the app
+        # thread in _apply_watcher_change (HOPPUS-86), so the UI never
+        # reads an index that is being mutated under it.
+        watcher = VaultWatcher(
+            index, on_change=self._on_watcher_change, apply_changes=False
+        )
         watcher.start()
         if not watcher.available:
             self.notify(
@@ -746,26 +913,41 @@ class HoppusApp(App[None]):
 
     def _on_watcher_change(self, path: Path) -> None:
         """
-        Route a live watcher event into the existing reindex path.
+        Route a live watcher event into the incremental reindex path
+        (HOPPUS-86).
 
         The watcher already filtered, debounced, and D5-suppressed the
-        event, so this simply rebuilds via :meth:`action_reindex`.
-        Called from the observer thread in live use (hopping onto the
-        app thread via ``call_from_thread``); tests drive it directly on
-        the app thread, where the hop must be skipped.
+        event, so this hops from the observer thread onto the app
+        thread (via ``call_from_thread``) and folds just the changed
+        file into the cached index — never a whole-vault rebuild.
+        Tests drive it directly on the app thread, where the hop must
+        be skipped.
 
-        :param path: The changed file (unused — the reindex is whole-
-            vault).
+        :param path: The changed file.
         """
-        del path
         if self._thread_id == threading.get_ident():
-            self.action_reindex()
+            self._apply_watcher_change(path)
             return
         try:
-            self.call_from_thread(self.action_reindex)
+            self.call_from_thread(self._apply_watcher_change, path)
         except RuntimeError:
             # The app is shutting down; the event no longer matters.
             self.log.error("Dropped a watcher event during shutdown")
+
+    def _apply_watcher_change(self, path: Path) -> None:
+        """
+        Apply one watcher-reported file change on the app thread.
+
+        Delegates to :meth:`_apply_note_change`, which reindexes the
+        single file incrementally and refreshes the affected panes;
+        fully guarded — no vault directory is a no-op.
+
+        :param path: The changed file.
+        """
+        vault_root = self._active_vault_path()
+        if not vault_root.is_dir():
+            return
+        self._apply_note_change(vault_root, path)
 
     # -- Not-yet-implemented actions -----------------------------------------
 
@@ -809,7 +991,7 @@ class HoppusApp(App[None]):
         handoff story.
         """
         vault_root = self._active_vault_path()
-        index = self._build_index(vault_root)
+        index = self._active_index(vault_root)
         if index is None:
             return
 
@@ -875,19 +1057,26 @@ class HoppusApp(App[None]):
 
     async def _after_editor(self, path: Path) -> None:
         """
-        Post-editor pipeline: integrity pass, reindex, preview refresh.
+        Post-editor pipeline: incremental reindex, integrity pass,
+        preview refresh (HOPPUS-85).
 
-        Runs as a Textual worker so the integrity pass can await modal
-        results via ``push_screen_wait``.
+        One incremental ``reindex_file`` folds the edit into the cached
+        index — never a whole-vault rebuild, never a full audit. The
+        integrity pass then runs against that fresh index; any writes
+        it makes (corrections, created notes) are folded in
+        incrementally by the pass itself. Runs as a Textual worker so
+        the integrity pass can await modal results via
+        ``push_screen_wait``.
 
         :param path: The note that was just edited.
         """
-        await self._run_integrity_pass(path)
         vault_root = self._active_vault_path()
-        if vault_root.is_dir():
-            if self._build_index(vault_root) is None:
-                return
-            await self.open_note(path, vault_root=vault_root)
+        if not vault_root.is_dir():
+            return
+        if self._apply_note_change(vault_root, path) is None:
+            return
+        await self._run_integrity_pass(path)
+        await self.open_note(path, vault_root=vault_root)
 
     async def _prompt_unresolved(
         self, unresolved: integrity.UnresolvedWikilink
@@ -909,14 +1098,16 @@ class HoppusApp(App[None]):
         """
         Run the link-integrity pass on an edited note (spec §7.3, D1).
 
-        Reads the file, rebuilds the index, and prompts sequentially —
-        one modal per unresolved wikilink, in document order. Decisions
-        are collected first and applied by
+        Reads the file, resolves against the cached index (built once
+        when cold — HOPPUS-85 keeps this off the full-rebuild path),
+        and prompts sequentially — one modal per unresolved wikilink,
+        in document order. Decisions are collected first and applied by
         :func:`hoppus.integrity.apply_integrity_decisions`, which
         rewrites corrections in reverse offset order (so every recorded
         span stays valid) and bootstraps created notes at the vault
         root with the prose untouched. The file is written back only
-        when its text changed, and the index is rebuilt afterwards.
+        when its text changed, and the changed/created files are folded
+        into the index incrementally afterwards.
 
         :param path: The note to check.
         """
@@ -928,7 +1119,7 @@ class HoppusApp(App[None]):
         if not vault_root.is_dir() or not path.is_file():
             return
         text = path.read_text(encoding="utf-8")
-        index = self._build_index(vault_root)
+        index = self._active_index(vault_root)
         if index is None:
             return
         unresolved = integrity.find_unresolved_wikilinks(text, index, path)
@@ -957,7 +1148,7 @@ class HoppusApp(App[None]):
         if created:
             self._suppress_self_write(*created)
         if created or new_text != text:
-            self._build_index(vault_root)
+            self._apply_note_change(vault_root, path, *created)
 
     def action_open_system(self) -> None:
         """
@@ -1093,7 +1284,8 @@ class HoppusApp(App[None]):
             self.notify(f"Link to…: {error}", severity="error", timeout=5)
             return
         if created is not None or new_text != text:
-            self._build_index(vault_root)
+            changed = [path] if created is None else [path, created]
+            self._apply_note_change(vault_root, *changed)
             await self.open_note(path, vault_root=vault_root)
         if new_text != text:
             self.notify(f"Linked to {target}", severity="information", timeout=3)
@@ -1190,7 +1382,7 @@ class HoppusApp(App[None]):
             return
         if created:
             self._suppress_self_write(path)
-            self._build_index(vault_root)
+            self._apply_note_change(vault_root, path)
         self.notify(
             f"Daily note {'created' if created else 'opened'}: {path.name}",
             severity="information",
@@ -1294,7 +1486,7 @@ class HoppusApp(App[None]):
         except (ValueError, FileExistsError, OSError) as error:
             self.notify(f"New note from template: {error}", severity="error", timeout=5)
             return
-        self._build_index(vault_root)
+        self._apply_note_change(vault_root, path)
         await self.open_note(path, vault_root=vault_root)
 
     def action_quick_capture(self) -> None:
@@ -1355,7 +1547,7 @@ class HoppusApp(App[None]):
             self.notify(f"Quick capture: {error}", severity="error", timeout=5)
             return
         self._suppress_self_write(path)
-        self._build_index(vault_root)
+        self._apply_note_change(vault_root, path)
         self.notify(f"Captured: {path.name}", severity="information", timeout=3)
         await self.open_note(path, vault_root=vault_root)
 
@@ -1473,10 +1665,12 @@ class HoppusApp(App[None]):
 
         This is the manual fallback of spec §8's graceful degradation:
         when the live watcher (auto-started on mount, HOPPUS-77) is
-        unavailable, the ``r`` keybind rebuilds on demand; the watcher
-        itself routes change events here too. Invalidates the cached
-        index, rebuilds it, and refreshes the open note's backlinks
-        pane.
+        unavailable, the ``r`` keybind rebuilds on demand (the watcher
+        itself applies changes incrementally via
+        :meth:`_apply_watcher_change`, HOPPUS-86). Invalidates the
+        cached index, rebuilds it, re-runs the full audit, refreshes
+        the open note's backlinks pane, and reloads the Explorer tree
+        (HOPPUS-90).
         """
         vault_root = self._active_vault_path()
         if not vault_root.is_dir():
@@ -1485,12 +1679,8 @@ class HoppusApp(App[None]):
         index = self._build_index(vault_root)
         if index is None:
             return
-        note_path = self.preview.note_path
-        if note_path is not None:
-            self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
-                Path(note_path), index, vault_root
-            )
         self._refresh_problems()
+        self._refresh_index_ui(vault_root, index)
         self.notify("Reindexed", severity="information", timeout=3)
 
     def action_vault_stats(self) -> None:

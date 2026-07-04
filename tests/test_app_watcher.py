@@ -7,7 +7,8 @@ watchdog ``Observer`` is monkeypatched with fakes (as in
 ``test_watcher.py``) and events are driven directly through the
 watcher's ``_handle``, with a manually-advanced clock poking the
 debounce (as in ``test_watcher_suppression.py``). The app must start a
-watcher on mount, route external changes through ``action_reindex``,
+watcher on mount, fold external changes into the cached index
+incrementally on the app thread (HOPPUS-86, never a full rebuild),
 keep D5 self-write suppression intact, restart the watcher on vault
 switch, honor the ``watcher.enabled`` opt-out, and degrade without
 raising when the watcher cannot start.
@@ -21,6 +22,7 @@ import pytest
 
 import hoppus.index.watcher as watcher_module
 from hoppus.config import default_config
+from hoppus.index.indexer import Index
 from hoppus.tui.app import HoppusApp
 
 
@@ -151,11 +153,12 @@ def test_watcher_starts_on_mount(
     asyncio.run(run())
 
 
-def test_external_change_triggers_reindex(
+def test_external_change_triggers_incremental_reindex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    A note changed on disk under the watched root reindexes the app.
+    A note changed on disk folds into the cached index incrementally
+    (HOPPUS-86): same Index object, no whole-vault rebuild.
     """
     vault = make_vault(tmp_path)
     patch_fake_observers(monkeypatch)
@@ -170,15 +173,24 @@ def test_external_change_triggers_reindex(
             assert initial_index is not None
             assert vault / "Gamma.md" not in initial_index.notes_by_path
 
+            builds: list[Path] = []
+            real_build = Index.build
+            monkeypatch.setattr(
+                Index,
+                "build",
+                classmethod(lambda cls, root: builds.append(root) or real_build(root)),
+            )
+
             gamma = vault / "Gamma.md"
             gamma.write_text("Gamma links to [[Alpha]].\n", encoding="utf-8")
             app._watcher._handle(gamma, "created")
             await pilot.pause()
 
-            assert app._index is not None
-            assert app._index is not initial_index
+            assert app._index is initial_index
             assert gamma in app._index.notes_by_path
-            assert "Reindexed" in app.recorded_notifications
+            assert app._index.backlinks[vault / "Alpha.md"] == {gamma}
+            assert builds == []
+            assert "Reindexed" not in app.recorded_notifications
 
     asyncio.run(run())
 
@@ -188,7 +200,7 @@ def test_burst_events_reindex_once(
 ) -> None:
     """
     Rapid repeated events for one path coalesce (leading-edge debounce)
-    into a single pass through the reindex path.
+    into a single pass through the incremental reindex path.
     """
     vault = make_vault(tmp_path)
     patch_fake_observers(monkeypatch)
@@ -202,17 +214,26 @@ def test_burst_events_reindex_once(
             clock = FakeClock()
             watcher.clock = clock
 
+            reindexed: list[Path] = []
+            real_reindex = Index.reindex_file
+
+            def spy_reindex(self: Index, path: Path) -> set[Path]:
+                reindexed.append(path)
+                return real_reindex(self, path)
+
+            monkeypatch.setattr(Index, "reindex_file", spy_reindex)
+
             alpha = vault / "Alpha.md"
             watcher._handle(alpha, "modified")
             clock.advance(0.05)
             watcher._handle(alpha, "modified")
             await pilot.pause()
-            assert app.recorded_notifications.count("Reindexed") == 1
+            assert reindexed == [alpha]
 
             clock.advance(1.0)
             watcher._handle(alpha, "modified")
             await pilot.pause()
-            assert app.recorded_notifications.count("Reindexed") == 2
+            assert reindexed == [alpha, alpha]
 
     asyncio.run(run())
 

@@ -120,6 +120,7 @@ class VaultWatcher:
         *,
         clock: Callable[[], float] = time.monotonic,
         debounce_interval: float = 0.1,
+        apply_changes: bool = True,
     ) -> None:
         """
         :param index: The vault index to keep up to date.
@@ -129,9 +130,16 @@ class VaultWatcher:
             debounce windows; injectable for deterministic tests.
         :param debounce_interval: Seconds within which repeated events
             for the same path are coalesced (leading-edge).
+        :param apply_changes: When True (the default), events are
+            applied to ``index`` on the observer thread via
+            ``Index.reindex_file``. The TUI passes False so the watcher
+            only filters/debounces and the app applies the incremental
+            update on its own thread (HOPPUS-86) — the index must never
+            be mutated out from under the UI.
         """
         self.index = index
         self.on_change = on_change
+        self.apply_changes = apply_changes
         self.available = False
         self.clock = clock
         self.debounce_interval = debounce_interval
@@ -269,7 +277,8 @@ class VaultWatcher:
                 logger.debug("Debounced %s event for %s", kind, path)
                 return
             self._last_processed[key] = now
-            self.index.reindex_file(path)
+            if self.apply_changes:
+                self.index.reindex_file(path)
             logger.info("Applied %s event for %s", kind, path)
             if self.on_change is not None:
                 self.on_change(path)
