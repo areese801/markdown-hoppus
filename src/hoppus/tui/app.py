@@ -20,10 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.worker import Worker
 from textual.widgets import (
@@ -59,7 +61,14 @@ from hoppus.search.engine import SearchResult
 from hoppus.system import SystemOpenError, open_in_system_app
 from hoppus.tui.command_palette import HoppusCommandProvider
 from hoppus.tui.graph_view import GraphScreen
-from hoppus.tui.keymap import default_bindings, resolve_keymap_overrides
+from hoppus.tui.keymap import (
+    DEFAULT_KEYMAP,
+    KEYMAP_SECTIONS,
+    default_bindings,
+    display_key,
+    resolve_keymap_overrides,
+)
+from hoppus.tui.modals.help_overlay import HelpScreen, HelpSection
 from hoppus.tui.modals.link_integrity import LinkIntegrityModal
 from hoppus.tui.modals.quick_switcher import QuickSwitcherModal, SwitcherResult
 from hoppus.tui.modals.related_picker import RelatedChoice, RelatedPickerModal
@@ -74,6 +83,10 @@ from hoppus.tui.panes.bookmarks import BookmarksPane
 from hoppus.tui.panes.explorer import ExplorerPane
 from hoppus.tui.panes.preview import PreviewPane
 from hoppus.vault import discover_vaults
+
+#: How long a single ``q`` stays armed before the quit intent expires
+#: (HOPPUS-93). A second ``q`` inside this window exits immediately.
+QUIT_CONFIRM_SECONDS = 2.0
 
 
 class PanePlaceholder(Static):
@@ -252,6 +265,11 @@ class HoppusApp(App[None]):
         # deterministically (the DirectoryTree's perpetual _loader
         # worker rules out ``workers.wait_for_complete``).
         self._launch_worker: Worker[None] | None = None
+        # Armed-quit state (HOPPUS-93): a first ``q`` arms the quit and
+        # starts a short expiry timer; a second ``q`` inside the window
+        # exits. Any other key (or the timer) disarms.
+        self._quit_armed: bool = False
+        self._quit_timer: Timer | None = None
         # Live watcher slot (spec §6.2/§8/D5, HOPPUS-77). Auto-started
         # on mount (and on vault switch) unless watcher.enabled is
         # false; self-writes route through _suppress_self_write so they
@@ -949,7 +967,7 @@ class HoppusApp(App[None]):
             return
         self._apply_note_change(vault_root, path)
 
-    # -- Not-yet-implemented actions -----------------------------------------
+    # -- Self-write suppression ------------------------------------------------
 
     def _suppress_self_write(self, *paths: Path) -> None:
         """
@@ -968,18 +986,141 @@ class HoppusApp(App[None]):
         except Exception:
             self.log.error(f"Failed to suppress self-write for {paths}")
 
-    def _not_implemented(self, feature: str) -> None:
-        """
-        Notify that a keybound feature lands in a later story.
+    # -- Quit (HOPPUS-93) -------------------------------------------------------
 
-        Args:
-            feature: Human-readable feature name for the notification.
+    def action_quit(self) -> None:  # type: ignore[override]
         """
-        self.notify(f"{feature}: not yet implemented", severity="warning", timeout=3)
+        Two-step quit (HOPPUS-93): the first ``q`` arms, ``qq`` exits.
+
+        A single press shows a transient "press again to quit" state
+        rather than a modal, so nothing can wedge the event loop; a
+        second press within :data:`QUIT_CONFIRM_SECONDS` exits
+        immediately. Any other key, or the window expiring, cancels.
+        """
+        if self._quit_armed:
+            self.exit()
+            return
+        self._quit_armed = True
+        self._quit_timer = self.set_timer(QUIT_CONFIRM_SECONDS, self._disarm_quit)
+        self.notify(
+            "Press q again to quit (any other key cancels)",
+            severity="information",
+            timeout=int(QUIT_CONFIRM_SECONDS) + 1,
+        )
+
+    def _disarm_quit(self) -> None:
+        """
+        Cancel a pending (armed) quit and stop its expiry timer.
+        """
+        self._quit_armed = False
+        timer, self._quit_timer = self._quit_timer, None
+        if timer is not None:
+            timer.stop()
+
+    def on_key(self, event: events.Key) -> None:
+        """
+        Disarm a pending quit on any key that is not bound to ``quit``
+        (HOPPUS-93).
+
+        Checks the active bindings rather than a literal ``q`` so a
+        remapped quit key (and Textual's built-in ``ctrl+q``) still
+        completes a double-press. The event is left unconsumed, so
+        Escape (and every other key) keeps its normal behavior while
+        also cancelling the armed quit.
+        """
+        if not self._quit_armed:
+            return
+        active = self.active_bindings.get(event.key)
+        if active is not None and active.binding.action == "quit":
+            return
+        self._disarm_quit()
+
+    # -- Pane focus by number (HOPPUS-94) ---------------------------------------
+
+    def action_focus_pane_1(self) -> None:
+        """
+        Focus the File Explorer (key ``1``), activating its tab.
+        """
+        self.query_one("#left-sidebar", TabbedContent).active = "tab-explorer"
+        self.query_one("#explorer-pane", ExplorerPane).focus()
+
+    def action_focus_pane_2(self) -> None:
+        """
+        Focus the main (preview) pane (key ``2``).
+        """
+        self.query_one("#main-pane").focus()
+
+    def action_focus_pane_3(self) -> None:
+        """
+        Focus the Backlinks pane (key ``3``); notifies when hidden.
+        """
+        if not self.right_sidebar.display:
+            self.notify(
+                "Backlinks sidebar is hidden (press \\ to show it)",
+                severity="information",
+                timeout=3,
+            )
+            return
+        self.query_one("#backlinks-pane", BacklinksPane).focus()
+
+    # -- Help overlay (HOPPUS-97) -----------------------------------------------
+
+    def _help_sections(self) -> list[HelpSection]:
+        """
+        Build the help overlay's sections from the LIVE keymap.
+
+        Merges :data:`DEFAULT_KEYMAP` with any ``keymap:`` config
+        overrides (so remapped keys show their actual binding), then
+        appends the non-remappable app extras and the widget-level
+        File Explorer and list-pane bindings.
+
+        Returns:
+            (title, rows) pairs for :class:`HelpScreen`.
+        """
+        overrides = resolve_keymap_overrides(self.config)
+        sections: list[HelpSection] = []
+        for title, binding_ids in KEYMAP_SECTIONS:
+            rows: list[tuple[str, str]] = []
+            for binding_id in binding_ids:
+                default_key, description, _show = DEFAULT_KEYMAP[binding_id]
+                key = overrides.get(binding_id, default_key)
+                rows.append((display_key(key), description))
+            sections.append((title, rows))
+        extras = [
+            (display_key(binding.key), binding.description)
+            for binding in type(self).BINDINGS
+            if isinstance(binding, Binding) and binding.id not in DEFAULT_KEYMAP
+        ]
+        if extras:
+            sections.append(("Other", extras))
+        sections.append(
+            (
+                "File Explorer (focused)",
+                [
+                    (display_key(binding.key), binding.description)
+                    for binding in ExplorerPane.BINDINGS
+                ],
+            )
+        )
+        sections.append(
+            (
+                "Backlinks & Bookmarks lists (focused)",
+                [
+                    (display_key(binding.key), binding.description)
+                    for binding in BacklinksPane.BINDINGS
+                ],
+            )
+        )
+        return sections
 
     def action_help(self) -> None:
-        """Help / keymap overlay (later story)."""
-        self._not_implemented("Help overlay")
+        """
+        Toggle the keymap cheat-sheet overlay (HOPPUS-97, key ``?``).
+        """
+        if isinstance(self.screen, HelpScreen):
+            self.screen.dismiss(None)
+            return
+        self.push_screen(HelpScreen(self._help_sections()))
 
     def action_quick_switcher(self) -> None:
         """

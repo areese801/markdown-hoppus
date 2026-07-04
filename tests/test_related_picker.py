@@ -157,7 +157,7 @@ def test_l_key_opens_picker_and_enter_links(tmp_path: Path) -> None:
         app = make_app(vault)
         async with app.run_test() as pilot:
             await app.open_note(vault / "Current.md", vault_root=vault)
-            await pilot.press("l")
+            await pilot.press("L")
             await pilot.pause()
             assert isinstance(app.screen, RelatedPickerModal)
             await pilot.press(*"existing")
@@ -180,7 +180,7 @@ def test_l_without_active_note_notifies(tmp_path: Path) -> None:
         vault = make_vault(tmp_path)
         app = make_app(vault)
         async with app.run_test() as pilot:
-            await pilot.press("l")
+            await pilot.press("L")
             await pilot.pause()
             assert not isinstance(app.screen, RelatedPickerModal)
 
@@ -198,7 +198,7 @@ def test_create_row_offered_for_unmatched_query(tmp_path: Path) -> None:
         app = make_app(vault)
         async with app.run_test() as pilot:
             await app.open_note(vault / "Current.md", vault_root=vault)
-            await pilot.press("l")
+            await pilot.press("L")
             await pilot.pause()
             screen = app.screen
             assert isinstance(screen, RelatedPickerModal)

@@ -46,7 +46,7 @@ def test_search_action_mounts_screen(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             screen = _screen(app)
             assert isinstance(app.focused, Input)
@@ -64,7 +64,7 @@ def test_typing_populates_ranked_results(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             screen = _screen(app)
             screen.update_results("target")
@@ -84,7 +84,7 @@ def test_operator_query_filters_results(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             screen = _screen(app)
             screen.update_results("path:Projects/")
@@ -103,7 +103,7 @@ def test_enter_opens_chosen_note_in_preview(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             screen = _screen(app)
             screen.update_results("title:Target")
@@ -126,7 +126,7 @@ def test_bad_query_never_crashes_screen(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             screen = _screen(app)
             screen.update_results('tag:"unbalanced ::: //')
@@ -144,7 +144,7 @@ def test_escape_cancels_without_navigation(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+f")
+            await pilot.press("f")
             await pilot.pause()
             assert isinstance(app.screen, SearchScreen)
             await pilot.press("escape")

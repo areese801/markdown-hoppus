@@ -151,6 +151,9 @@ def test_keymap_override_is_honored_in_app() -> None:
             }
             assert active.get("ctrl+q") == "quit"
             assert active.get("q") != "quit"
+            # Two-step quit (HOPPUS-93): first press arms, second exits.
+            await pilot.press("ctrl+q")
+            assert app._quit_armed
             await pilot.press("ctrl+q")
         assert app.return_code == 0
 
@@ -168,7 +171,16 @@ def test_default_bindings_cover_spec_keymap() -> None:
     assert by_id["toggle_right_sidebar"].key == "backslash"
     assert by_id["cycle_pane"].key == "tab"
     assert by_id["quit"].key == "q"
-    assert by_id["command_palette"].key == "ctrl+p"
+    # Ergonomic single-character defaults (HOPPUS-92).
+    assert by_id["command_palette"].key == "p"
+    assert by_id["quick_switcher"].key == "o"
+    assert by_id["search"].key == "f"
+    # ``l`` is reserved for vim-style navigation (HOPPUS-92).
+    assert by_id["link_note"].key == "L"
+    # Pane focus by number (HOPPUS-94).
+    assert by_id["focus_pane_1"].key == "1"
+    assert by_id["focus_pane_2"].key == "2"
+    assert by_id["focus_pane_3"].key == "3"
 
 
 def test_resolve_keymap_overrides_normalizes_and_filters() -> None:

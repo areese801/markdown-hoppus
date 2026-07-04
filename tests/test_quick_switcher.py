@@ -49,7 +49,7 @@ def test_ctrl_o_mounts_switcher_with_all_notes(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.pause()
             modal = _modal(app)
             options = modal.query_one("#switcher-results", OptionList)
@@ -68,7 +68,7 @@ def test_typing_filters_candidates_live(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.pause()
             modal = _modal(app)
             options = modal.query_one("#switcher-results", OptionList)
@@ -90,7 +90,7 @@ def test_alias_query_surfaces_note(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.press(*"the target")
             await pilot.pause()
             assert _modal(app)._results[0].title == "Target Note"
@@ -106,7 +106,7 @@ def test_enter_opens_note_in_preview(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.press(*"target")
             await pilot.pause()
             await pilot.press("enter")
@@ -128,7 +128,7 @@ def test_editor_modifier_routes_to_editor_action(sample_vault: Path) -> None:
         invoked: list[bool] = []
         app.action_open_editor = lambda: invoked.append(True)  # type: ignore[method-assign]
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.press(*"target")
             await pilot.pause()
             await pilot.press("ctrl+e")
@@ -150,7 +150,7 @@ def test_escape_cancels_without_navigation(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.pause()
             assert isinstance(app.screen, QuickSwitcherModal)
             await pilot.press("escape")
@@ -170,7 +170,7 @@ def test_arrow_keys_move_highlight_from_input(sample_vault: Path) -> None:
     async def run() -> None:
         app = make_app(sample_vault)
         async with app.run_test() as pilot:
-            await pilot.press("ctrl+o")
+            await pilot.press("o")
             await pilot.pause()
             modal = _modal(app)
             options = modal.query_one("#switcher-results", OptionList)

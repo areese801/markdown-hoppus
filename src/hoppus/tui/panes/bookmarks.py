@@ -13,6 +13,7 @@ navigates through the app's ``open_note`` funnel.
 
 from pathlib import Path
 
+from textual.binding import Binding
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
@@ -26,6 +27,13 @@ class BookmarksPane(OptionList):
     """
     Left-sidebar list of the vault's bookmarked (starred) notes.
     """
+
+    BINDINGS = [
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("g", "first", "First", show=False),
+        Binding("G", "last", "Last", show=False),
+    ]
 
     def __init__(self, *, id: str | None = None) -> None:
         """

@@ -16,6 +16,12 @@ rename, ``delete`` delete (with a ConfirmModal), ``ctrl+m`` move. The
 filesystem work lives in :mod:`hoppus.fileops`; rename/move propagate
 inbound links (spec §6.2), prompting first when
 ``files.prompt_before_link_update`` is set and links would change.
+
+Vim-style navigation (HOPPUS-92) is bound at the widget level too:
+``j``/``k`` move the cursor, ``h`` collapses (or jumps to the parent),
+``l`` expands a directory or opens a file, and ``g``/``G`` jump to the
+first/last entry. These fire only while the explorer is focused, so
+they never interfere with text Inputs or app-level keys.
 """
 
 from functools import partial
@@ -49,6 +55,12 @@ class ExplorerPane(DirectoryTree):
         Binding("f2", "rename_entry", "Rename"),
         Binding("delete", "delete_entry", "Delete"),
         Binding("ctrl+m", "move_entry", "Move"),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("h", "vim_left", "Collapse / parent", show=False),
+        Binding("l", "vim_right", "Expand / open", show=False),
+        Binding("g", "cursor_top", "First entry", show=False),
+        Binding("G", "cursor_bottom", "Last entry", show=False),
     ]
 
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
@@ -86,6 +98,47 @@ class ExplorerPane(DirectoryTree):
         ):
             label.stylize("dim")
         return label
+
+    # -- Vim-style navigation (HOPPUS-92) --------------------------------------
+
+    def action_vim_left(self) -> None:
+        """
+        Vim ``h``: collapse the cursor directory, else jump to its parent.
+        """
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.allow_expand and node.is_expanded:
+            node.collapse()
+        else:
+            self.action_cursor_parent()
+
+    def action_vim_right(self) -> None:
+        """
+        Vim ``l``: expand the cursor directory, or open the cursor file.
+        """
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.allow_expand:
+            if not node.is_expanded:
+                node.expand()
+        else:
+            self.action_select_cursor()
+
+    def action_cursor_top(self) -> None:
+        """
+        Vim ``g``: move the cursor to the first tree line.
+        """
+        if self.last_line >= 0:
+            self.move_cursor_to_line(0)
+
+    def action_cursor_bottom(self) -> None:
+        """
+        Vim ``G``: move the cursor to the last tree line.
+        """
+        if self.last_line >= 0:
+            self.move_cursor_to_line(self.last_line)
 
     # -- CRUD helpers ---------------------------------------------------------
 

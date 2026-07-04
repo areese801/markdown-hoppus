@@ -29,19 +29,28 @@ CHARACTER_KEY_ALIASES: dict[str, str] = {
 }
 
 #: Spec §9.16 defaults: binding id -> (key, description, show in footer).
+#:
+#: HOPPUS-92 moved the palette/switcher/search chords to ergonomic
+#: single-character defaults (``p``/``o``/``f``) and rebound
+#: ``link_note`` from ``l`` to ``L`` so ``l`` is free for vim-style
+#: "move right" navigation in the panes. HOPPUS-94 added the
+#: ``focus_pane_*`` number keys.
 DEFAULT_KEYMAP: dict[str, tuple[str, str, bool]] = {
     "help": ("question_mark", "Help", True),
-    "command_palette": ("ctrl+p", "Palette", True),
-    "quick_switcher": ("ctrl+o", "Open note", True),
-    "search": ("ctrl+f", "Search", True),
+    "command_palette": ("p", "Palette", True),
+    "quick_switcher": ("o", "Open note", True),
+    "search": ("f", "Search", True),
     "open_editor": ("e", "Editor", False),
     "open_system": ("O", "Open in app", False),
     "open_browser": ("b", "Browser", False),
-    "link_note": ("l", "Link to…", False),
+    "link_note": ("L", "Link to…", False),
     "toggle_graph": ("g", "Graph", False),
     "graph_radius_up": ("plus", "Hops +", False),
     "graph_radius_down": ("minus", "Hops -", False),
     "cycle_pane": ("tab", "Cycle panes", True),
+    "focus_pane_1": ("1", "Explorer pane", False),
+    "focus_pane_2": ("2", "Main pane", False),
+    "focus_pane_3": ("3", "Backlinks pane", False),
     "toggle_right_sidebar": ("backslash", "Backlinks", True),
     "tag_pane": ("t", "Tags", False),
     "daily_note": ("d", "Daily note", False),
@@ -54,6 +63,63 @@ DEFAULT_KEYMAP: dict[str, tuple[str, str, bool]] = {
     "vault_switcher": ("v", "Vault", False),
     "quit": ("q", "Quit", True),
 }
+
+#: Help-overlay grouping (HOPPUS-97): section title -> binding ids, in
+#: display order. Every :data:`DEFAULT_KEYMAP` id appears exactly once.
+KEYMAP_SECTIONS: list[tuple[str, list[str]]] = [
+    (
+        "Navigation & search",
+        ["help", "command_palette", "quick_switcher", "search"],
+    ),
+    (
+        "Panes & layout",
+        [
+            "cycle_pane",
+            "focus_pane_1",
+            "focus_pane_2",
+            "focus_pane_3",
+            "toggle_right_sidebar",
+            "tag_pane",
+        ],
+    ),
+    (
+        "Notes & productivity",
+        [
+            "open_editor",
+            "open_system",
+            "open_browser",
+            "link_note",
+            "daily_note",
+            "new_note",
+            "new_note_from_template",
+            "quick_capture",
+            "toggle_star",
+            "yank_menu",
+        ],
+    ),
+    ("Graph", ["toggle_graph", "graph_radius_up", "graph_radius_down"]),
+    ("App", ["reindex", "vault_switcher", "quit"]),
+]
+
+#: Reverse of :data:`CHARACTER_KEY_ALIASES`, for human-readable display.
+_KEY_DISPLAY_ALIASES: dict[str, str] = {
+    long: char for char, long in CHARACTER_KEY_ALIASES.items()
+}
+
+
+def display_key(key: str) -> str:
+    """
+    Render a Textual key name for humans (help overlay, docs).
+
+    Args:
+        key: A Textual key name such as ``"question_mark"`` or
+            ``"ctrl+p"``.
+
+    Returns:
+        The short punctuation form when one exists (``"?"``), otherwise
+        the key unchanged.
+    """
+    return _KEY_DISPLAY_ALIASES.get(key, key)
 
 
 def normalize_key(key: str) -> str:
