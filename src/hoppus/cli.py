@@ -26,7 +26,13 @@ import typer
 
 from hoppus import __version__
 from hoppus.capture import capture_note
-from hoppus.config import global_config_path, load_config
+from hoppus.config import (
+    ConfigError,
+    default_config,
+    global_config_path,
+    load_config,
+    resolved_config_path,
+)
 from hoppus.daily import open_or_create_daily
 from hoppus.environment import find_binary, run_doctor
 from hoppus.find import run_find
@@ -46,7 +52,7 @@ from hoppus.render.browser import (
     write_preview_html,
 )
 from hoppus.tui.app import HoppusApp
-from hoppus.vault import Vault, discover_vaults
+from hoppus.vault import Vault, discover_vaults, resolve_default_vault
 
 NOT_IMPLEMENTED_SUFFIX = "not yet implemented"
 
@@ -61,16 +67,26 @@ app = typer.Typer(
 )
 
 
-def _vaults_root() -> Path:
+def _load_config_or_exit() -> dict[str, Any]:
     """
-    Return the configured Vaults Root as an expanded path.
+    Load the merged config, exiting cleanly on a malformed file.
+
+    A YAML parse error in a config file becomes an actionable message
+    naming the file and the problem — never a raw traceback
+    (HOPPUS-87).
 
     Returns:
-        The ``vaults_root`` value from the merged config (spec §12), with
-        ``~`` expanded.
+        The fully merged configuration dict.
+
+    Raises:
+        typer.Exit: With code 1 when a config file cannot be parsed.
     """
-    config = load_config()
-    return Path(config["vaults_root"]).expanduser()
+    try:
+        return load_config()
+    except ConfigError as error:
+        typer.secho(str(error), fg=typer.colors.RED, err=True)
+        typer.secho("Fix the file above, then run `hop doctor` to verify.", err=True)
+        raise typer.Exit(code=1) from error
 
 
 def _missing_root_guidance() -> str:
@@ -118,6 +134,88 @@ def _discover_or_exit(vaults_root: Path) -> list[Vault]:
         raise typer.Exit(code=1) from error
 
 
+def _choose_vault_guidance(discovered: list[Vault]) -> str:
+    """
+    Return the "choose a vault" guidance for an unresolved default.
+
+    Shown when no ``default_vault`` is set (or it matches nothing) and
+    several vaults exist, so hoppus cannot pick one for the user
+    (HOPPUS-88). Mirrors the HOPPUS-74 first-run guidance: name the
+    exact config file and the key to set.
+
+    Args:
+        discovered: The vaults discovered under the Vaults Root.
+
+    Returns:
+        The multi-line guidance message.
+    """
+    names = ", ".join(vault.name for vault in discovered)
+    return (
+        f"No default_vault set; choose one of: {names}\n"
+        f"Pass a vault name (e.g. `hop open <vault>`), or set in "
+        f"{global_config_path()}:\n"
+        "  default_vault: <name>"
+    )
+
+
+def _select_vault(
+    config: dict[str, Any],
+    discovered: list[Vault],
+    vaults_root: Path,
+    requested: str | None = None,
+) -> Vault:
+    """
+    Select the vault a command should operate on (HOPPUS-88).
+
+    An explicitly requested vault name (CLI argument/option) must match
+    a discovered vault exactly. Otherwise the configured
+    ``default_vault`` is resolved gracefully: a name match wins; with
+    no usable name and exactly one vault, that vault is used; with
+    several vaults, the user is asked to choose.
+
+    Args:
+        config: The merged configuration mapping (spec §12).
+        discovered: The vaults discovered under ``vaults_root``.
+        vaults_root: The Vaults Root (for error messages).
+        requested: An explicit vault name from the command line, or
+            None to use the configured default.
+
+    Returns:
+        The selected vault.
+
+    Raises:
+        typer.Exit: With code 1 when the requested vault does not
+            exist, no vaults were discovered, or several vaults exist
+            and no default could be resolved.
+    """
+    if requested is not None:
+        selected = next(
+            (entry for entry in discovered if entry.name == requested), None
+        )
+        if selected is None:
+            typer.secho(
+                f"No vault named {requested!r} under {vaults_root}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        return selected
+
+    if not discovered:
+        typer.secho(
+            f"No vaults found under {vaults_root}", fg=typer.colors.RED, err=True
+        )
+        typer.secho(_missing_root_guidance(), err=True)
+        raise typer.Exit(code=1)
+
+    name = config.get("default_vault")
+    selected = resolve_default_vault(str(name) if name else None, discovered)
+    if selected is None:
+        typer.secho(_choose_vault_guidance(discovered), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    return selected
+
+
 STUB_EXIT_CODE = 3
 """Exit code shared by every not-yet-implemented stub subcommand."""
 
@@ -149,21 +247,14 @@ def _launch_tui(vault: str | None = None) -> None:
             vault.
 
     Raises:
-        typer.Exit: With code 1 if the Vaults Root is missing or no vault
-            with the resolved name exists under it.
+        typer.Exit: With code 1 if the Vaults Root is missing, no vault
+            with the resolved name exists under it, or no default vault
+            can be resolved (HOPPUS-88).
     """
-    config = load_config()
+    config = _load_config_or_exit()
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = vault or config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root, requested=vault)
     tui_config = {**config, "default_vault": selected.name}
     HoppusApp(config=tui_config, vaults_root=vaults_root).run()
 
@@ -188,7 +279,8 @@ def vaults() -> None:
     """
     List vaults under the Vaults Root (spec §10).
     """
-    vaults_root = _vaults_root()
+    config = _load_config_or_exit()
+    vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
     if not discovered:
         typer.echo(f"No vaults found under {vaults_root}")
@@ -232,7 +324,7 @@ def mcp() -> None:
 
     Blocks serving MCP clients until the client disconnects.
     """
-    mcp_server.run(load_config())
+    mcp_server.run(_load_config_or_exit())
 
 
 @app.command()
@@ -255,18 +347,10 @@ def daily() -> None:
     plus a ``(created)``/``(exists)`` marker. Idempotent — a second
     invocation reports the same file without touching it.
     """
-    config = load_config()
+    config = _load_config_or_exit()
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root)
 
     path, created = open_or_create_daily(selected.path, config, now=datetime.now())
     typer.echo(f"{path} ({'created' if created else 'exists'})")
@@ -285,18 +369,10 @@ def capture(
     filename is always the timestamp. Prints the created note's
     absolute path.
     """
-    config = load_config()
+    config = _load_config_or_exit()
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root)
 
     try:
         path = capture_note(selected.path, config, text=text or "", now=datetime.now())
@@ -329,15 +405,7 @@ def _resolve_preview_note(
     """
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = vault or config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root, requested=vault)
     index = Index.build(selected.path)
     try:
         return resolve_note(index, note_ref)
@@ -385,7 +453,7 @@ def preview(
     if path is None:
         typer.secho("preview --browser requires a PATH", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    config = load_config()
+    config = _load_config_or_exit()
     note = Path(path).expanduser()
     if not note.is_file():
         note = _resolve_preview_note(config, path, vault)
@@ -420,18 +488,10 @@ def find(
     when ``fzf`` is absent. Cancelling in fzf exits 0 and prints
     nothing.
     """
-    config = load_config()
+    config = _load_config_or_exit()
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root)
 
     fzf_path = find_binary("fzf")
     if fzf_path is None:
@@ -500,18 +560,10 @@ def audit(
     Exit codes: 0 when the vault is clean, 1 when one or more problems
     are reported (so CI can gate on link hygiene).
     """
-    config = load_config()
+    config = _load_config_or_exit()
     vaults_root = Path(config["vaults_root"]).expanduser()
     discovered = _discover_or_exit(vaults_root)
-    name = vault or config["default_vault"]
-    selected = next((entry for entry in discovered if entry.name == name), None)
-    if selected is None:
-        typer.secho(
-            f"No vault named {name!r} under {vaults_root}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    selected = _select_vault(config, discovered, vaults_root, requested=vault)
 
     index = Index.build(selected.path)
     report = audit_vault(index, config=config)
@@ -535,9 +587,30 @@ def doctor() -> None:
     Environment health: optional binaries, editor detection, config (spec §7.5).
 
     Distinct from ``audit`` (content health). Always runs to completion —
-    problems become report lines, not nonzero exits.
+    problems become report lines, not nonzero exits. A malformed config
+    file is reported as unhealthy (with the parse error) rather than
+    crashing (HOPPUS-87), and the resolved config file path is always
+    shown (HOPPUS-89).
     """
-    report = run_doctor(load_config())
+    config_error: str | None = None
+    try:
+        config = load_config()
+    except ConfigError as error:
+        config = default_config()
+        config_error = str(error)
+    report = run_doctor(
+        config, config_path=resolved_config_path(), config_error=config_error
+    )
+
+    typer.echo("Config:")
+    if report.config_path is not None:
+        typer.echo(f"  file: {report.config_path}")
+    else:
+        typer.echo(
+            f"  file: none found at {global_config_path()} (using built-in defaults)"
+        )
+    typer.echo(f"  vaults_root: {report.vaults_root}")
+    typer.echo(f"  default_vault: {report.default_vault or '(not set)'}")
 
     typer.echo("Optional accelerators:")
     for name, path in report.binaries.items():

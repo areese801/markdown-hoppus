@@ -91,6 +91,32 @@ def discover_vaults(vaults_root: Path | None = None) -> list[Vault]:
     return sorted(vaults, key=lambda vault: vault.name)
 
 
+def resolve_default_vault(name: str | None, vaults: list[Vault]) -> Vault | None:
+    """
+    Resolve the default vault gracefully (HOPPUS-88).
+
+    Selection order: the vault whose name matches ``name``; otherwise,
+    when exactly one vault exists, that lone vault (so a partial config
+    with no usable ``default_vault`` still proceeds sanely).
+
+    Args:
+        name: The configured ``default_vault`` value, possibly None or
+            empty.
+        vaults: The vaults discovered under the Vaults Root.
+
+    Returns:
+        The resolved default vault, or None when several vaults exist
+        and none matches — the caller must ask the user to choose.
+    """
+    if name:
+        for vault in vaults:
+            if vault.name == name:
+                return vault
+    if len(vaults) == 1:
+        return vaults[0]
+    return None
+
+
 @dataclass
 class VaultManager:
     """

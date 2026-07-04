@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hoppus.vault import Vault, VaultManager, discover_vaults
+from hoppus.vault import Vault, VaultManager, discover_vaults, resolve_default_vault
 
 
 def _snapshot(directory: Path) -> dict[str, bytes]:
@@ -209,3 +209,53 @@ class TestVaultManager:
         (vaults_root / "Work").rmdir()
         manager.refresh()
         assert manager.active is None
+
+
+class TestResolveDefaultVault:
+    """
+    Graceful default-vault resolution (HOPPUS-88).
+    """
+
+    def test_name_match_wins(self) -> None:
+        """
+        A configured name matching a vault resolves to that vault.
+        """
+        vaults = [
+            Vault(name="Personal", path=Path("/n/Personal")),
+            Vault(name="Work", path=Path("/n/Work")),
+        ]
+        resolved = resolve_default_vault("Work", vaults)
+        assert resolved is not None
+        assert resolved.name == "Work"
+
+    def test_no_name_with_single_vault_uses_it(self) -> None:
+        """
+        With no ``default_vault`` and exactly one vault, that vault wins.
+        """
+        vault = Vault(name="Only", path=Path("/n/Only"))
+        assert resolve_default_vault(None, [vault]) == vault
+        assert resolve_default_vault("", [vault]) == vault
+
+    def test_unmatched_name_with_single_vault_uses_it(self) -> None:
+        """
+        A name matching nothing still falls back to the lone vault.
+        """
+        vault = Vault(name="Only", path=Path("/n/Only"))
+        assert resolve_default_vault("Personal", [vault]) == vault
+
+    def test_no_name_with_several_vaults_is_unresolved(self) -> None:
+        """
+        Several vaults and no usable name → None; the caller must ask.
+        """
+        vaults = [
+            Vault(name="Personal", path=Path("/n/Personal")),
+            Vault(name="Work", path=Path("/n/Work")),
+        ]
+        assert resolve_default_vault(None, vaults) is None
+
+    def test_no_vaults_is_unresolved(self) -> None:
+        """
+        With nothing discovered there is nothing to resolve.
+        """
+        assert resolve_default_vault(None, []) is None
+        assert resolve_default_vault("Personal", []) is None

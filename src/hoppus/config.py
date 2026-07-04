@@ -13,9 +13,20 @@ from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 GLOBAL_CONFIG_RELPATH = Path("hoppus") / "config.yaml"
 VAULT_CONFIG_RELPATH = Path(".hoppus") / "config.yaml"
+
+
+class ConfigError(Exception):
+    """
+    Raised when a config file exists but cannot be parsed as YAML.
+
+    The message names the offending file and includes the parser's
+    description of the problem, so callers can surface it verbatim as
+    an actionable error instead of a traceback (HOPPUS-87).
+    """
 
 
 def default_config() -> dict[str, Any]:
@@ -104,6 +115,22 @@ def global_config_path() -> Path:
     return base / GLOBAL_CONFIG_RELPATH
 
 
+def resolved_config_path() -> Path | None:
+    """
+    Return the global config file that :func:`load_config` would read.
+
+    Answers "which config file did ``hop`` actually load?" for
+    ``hop doctor`` (HOPPUS-89), resolving XDG precedence the same way
+    as :func:`global_config_path`.
+
+    Returns:
+        The path of the existing global config file, or None when no
+        file exists there and the built-in defaults are in use.
+    """
+    path = global_config_path()
+    return path if path.is_file() else None
+
+
 def vault_config_path(vault: Path) -> Path:
     """
     Return the per-vault config override path for a vault directory.
@@ -151,11 +178,19 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
     Returns:
         The parsed mapping as a plain dict; an empty dict if the file
         does not exist, is empty, or does not contain a mapping.
+
+    Raises:
+        ConfigError: If the file exists but is not valid YAML
+            (HOPPUS-87). The message names the file and the parse
+            problem.
     """
     if not path.is_file():
         return {}
     yaml = YAML(typ="safe")
-    data = yaml.load(path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"))
+    except YAMLError as error:
+        raise ConfigError(f"Malformed config file: {path}\n{error}") from error
     if not isinstance(data, dict):
         return {}
     return _to_plain(data)
@@ -192,6 +227,10 @@ def load_config(vault: Path | None = None) -> dict[str, Any]:
 
     Returns:
         The fully merged configuration dict.
+
+    Raises:
+        ConfigError: If a config file exists but cannot be parsed as
+            YAML (HOPPUS-87).
     """
     config = default_config()
     config = deep_merge(config, _load_yaml_file(global_config_path()))

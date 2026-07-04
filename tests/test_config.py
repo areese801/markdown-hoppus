@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from hoppus import config as config_mod
-from hoppus.config import default_config, deep_merge, global_config_path, load_config
+from hoppus.config import (
+    ConfigError,
+    default_config,
+    deep_merge,
+    global_config_path,
+    load_config,
+    resolved_config_path,
+)
 
 
 @pytest.fixture()
@@ -126,3 +133,47 @@ def test_empty_or_non_mapping_yaml_files_are_ignored(xdg_home, tmp_path):
     vault = tmp_path / "Vault"
     _write_yaml(vault / ".hoppus" / "config.yaml", "- just\n- a list\n")
     assert load_config(vault=vault) == default_config()
+
+
+def test_malformed_global_config_raises_config_error(xdg_home):
+    """
+    A YAML syntax error in the global config raises ConfigError naming
+    the file — never a raw ruamel exception (HOPPUS-87).
+    """
+    path = xdg_home / "hoppus" / "config.yaml"
+    _write_yaml(path, "vaults_root: [unclosed\n  bad: : :\n")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config()
+    assert str(path) in str(excinfo.value)
+    assert "Malformed config file" in str(excinfo.value)
+
+
+def test_malformed_vault_config_raises_config_error(xdg_home, tmp_path):
+    """
+    A YAML syntax error in the per-vault override raises ConfigError
+    naming that file (HOPPUS-87).
+    """
+    vault = tmp_path / "Vault"
+    path = vault / ".hoppus" / "config.yaml"
+    _write_yaml(path, "daily_notes:\n\tfolder: tabs-are-invalid\n")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(vault=vault)
+    assert str(path) in str(excinfo.value)
+
+
+def test_resolved_config_path_when_file_exists(xdg_home):
+    """
+    ``resolved_config_path`` returns the XDG-resolved file when present
+    (HOPPUS-89).
+    """
+    path = xdg_home / "hoppus" / "config.yaml"
+    _write_yaml(path, "default_vault: Work\n")
+    assert resolved_config_path() == path
+
+
+def test_resolved_config_path_none_when_no_file(xdg_home):
+    """
+    With no global config file, ``resolved_config_path`` returns None —
+    the built-in defaults are in use (HOPPUS-89).
+    """
+    assert resolved_config_path() is None

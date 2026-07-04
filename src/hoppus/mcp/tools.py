@@ -52,7 +52,7 @@ from hoppus.naming import validate_note_name
 from hoppus.related import _section_bounds
 from hoppus.search.engine import search as _search
 from hoppus.search.operators import matches_tag, parse_query
-from hoppus.vault import discover_vaults
+from hoppus.vault import discover_vaults, resolve_default_vault
 
 _MD_SUFFIX = ".md"
 
@@ -74,24 +74,34 @@ def _resolve_vault(config: dict[str, Any], vault_name: str | None = None) -> Pat
     Resolve a vault name to its directory under the configured Vaults Root.
 
     :param config: The merged configuration mapping (spec §12).
-    :param vault_name: Vault to select; defaults to ``default_vault``.
+    :param vault_name: Vault to select; defaults to ``default_vault``,
+        resolved gracefully (name match, else the lone discovered vault,
+        HOPPUS-88).
     :returns: The vault's directory path.
-    :raises VaultNotFound: If the Vaults Root is missing or no vault with
-        the requested name exists under it.
+    :raises VaultNotFound: If the Vaults Root is missing, no vault with
+        the requested name exists under it, or no default vault can be
+        resolved.
     """
     vaults_root = Path(config["vaults_root"]).expanduser()
-    name = vault_name or config["default_vault"]
     try:
         vaults = discover_vaults(vaults_root)
     except (FileNotFoundError, NotADirectoryError) as error:
         raise VaultNotFound(str(error)) from error
-    for vault in vaults:
-        if vault.name == name:
-            return vault.path
     known = ", ".join(vault.name for vault in vaults) or "(none)"
-    raise VaultNotFound(
-        f"No vault named {name!r} under {vaults_root} (available: {known})"
-    )
+    if vault_name is not None:
+        for vault in vaults:
+            if vault.name == vault_name:
+                return vault.path
+        raise VaultNotFound(
+            f"No vault named {vault_name!r} under {vaults_root} (available: {known})"
+        )
+    name = config.get("default_vault")
+    resolved = resolve_default_vault(str(name) if name else None, vaults)
+    if resolved is None:
+        raise VaultNotFound(
+            f"No default_vault set; choose one of: {known} (under {vaults_root})"
+        )
+    return resolved.path
 
 
 def resolve_note(index: Index, note_ref: str) -> Path:

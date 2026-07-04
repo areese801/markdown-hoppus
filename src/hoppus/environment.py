@@ -33,7 +33,7 @@ from typing import Any
 
 from hoppus.integrity import resolve_editor_command
 from hoppus.templates import list_templates, resolve_templates_folder
-from hoppus.vault import Vault, discover_vaults
+from hoppus.vault import Vault, discover_vaults, resolve_default_vault
 
 OPTIONAL_BINARIES = ("rg", "fzf", "glow", "go-grip")
 
@@ -245,7 +245,16 @@ class DoctorReport:
         editor_info: The detected editor.
         plugin_detected: obsidian.nvim status (True/False/None).
         nudge: The obsidian.nvim nudge string, or None when suppressed.
-        config_warnings: Best-effort config health warnings.
+        config_warnings: Best-effort config health warnings, including
+            a config-file parse error when the loader reported one
+            (HOPPUS-87).
+        config_path: The resolved global config file that was loaded,
+            or None when no file was found and the built-in defaults
+            are in use (HOPPUS-89).
+        default_vault: The resolved default vault name — the configured
+            value, or the lone discovered vault when the configured
+            value is absent or matches nothing (HOPPUS-88) — or None
+            when unresolvable.
         vaults_root: The configured Vaults Root.
         vault_names: Discovered vault names, or None on discovery error.
         vaults_error: Discovery error message, or None.
@@ -261,6 +270,8 @@ class DoctorReport:
     plugin_detected: bool | None
     nudge: str | None
     config_warnings: list[str] = field(default_factory=list)
+    config_path: Path | None = None
+    default_vault: str | None = None
     vaults_root: Path = Path()
     vault_names: list[str] | None = None
     vaults_error: str | None = None
@@ -272,6 +283,8 @@ class DoctorReport:
 def run_doctor(
     config: Mapping[str, Any],
     *,
+    config_path: Path | None = None,
+    config_error: str | None = None,
     environ: Mapping[str, str] = os.environ,
     which: Callable[[str], str | None] = shutil.which,
     home: Callable[[], Path] = Path.home,
@@ -283,6 +296,12 @@ def run_doctor(
 
     Args:
         config: The merged configuration (spec §12).
+        config_path: The resolved global config file that was loaded,
+            or None when defaults are in use (HOPPUS-89).
+        config_error: A config-file parse error from the loader, or
+            None. Reported as the first config health warning so a
+            malformed config marks the report unhealthy instead of
+            crashing (HOPPUS-87).
         environ: The process environment.
         which: PATH lookup for optional binaries.
         home: Home directory provider for plugin detection.
@@ -303,9 +322,9 @@ def run_doctor(
     templates_folder: Path | None = None
     templates_folder_exists = False
     template_count = 0
-    default_name = str(config.get("default_vault", ""))
-    default_vault = next(
-        (vault for vault in vaults or [] if vault.name == default_name), None
+    default_name = config.get("default_vault")
+    default_vault = resolve_default_vault(
+        str(default_name) if default_name else None, vaults or []
     )
     if default_vault is not None:
         config_dict = dict(config)
@@ -318,7 +337,11 @@ def run_doctor(
         editor_info=editor_info,
         plugin_detected=plugin_detected,
         nudge=nudge,
-        config_warnings=check_config_health(config),
+        config_warnings=(
+            ([config_error] if config_error else []) + check_config_health(config)
+        ),
+        config_path=config_path,
+        default_vault=default_vault.name if default_vault is not None else None,
         vaults_root=vaults_root,
         vault_names=[vault.name for vault in vaults] if vaults is not None else None,
         vaults_error=vaults_error,

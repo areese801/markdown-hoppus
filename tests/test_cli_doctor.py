@@ -68,12 +68,15 @@ def _install_fakes(
             "editor_support": {"encourage_obsidian_nvim": encourage},
         }
 
-    def fake_run_doctor(config: dict[str, Any]) -> environment.DoctorReport:
+    def fake_run_doctor(
+        config: dict[str, Any], **kwargs: Any
+    ) -> environment.DoctorReport:
         """
         Run the real doctor assembly with hermetic injected deps.
         """
         return environment.run_doctor(
             config,
+            **kwargs,
             environ={"EDITOR": editor},
             which=lambda name: None,
             home=lambda: tmp_path / "home",
@@ -171,12 +174,15 @@ def test_doctor_missing_vaults_root_is_warning_not_exit(
         """
         raise FileNotFoundError(f"Vaults Root not found: {path}")
 
-    def fake_run_doctor(config: dict[str, Any]) -> environment.DoctorReport:
+    def fake_run_doctor(
+        config: dict[str, Any], **kwargs: Any
+    ) -> environment.DoctorReport:
         """
         Run the real doctor assembly with a failing discovery.
         """
         return environment.run_doctor(
             config,
+            **kwargs,
             environ={"EDITOR": "emacs"},
             which=lambda name: None,
             home=lambda: tmp_path / "home",

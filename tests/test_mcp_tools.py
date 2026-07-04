@@ -330,3 +330,33 @@ def test_audit_vault_reports_unresolved(config: dict[str, Any]) -> None:
     assert issue["target"] == "Missing Note"
     assert result["by_kind"] == {issue["kind"]: 1}
     assert json.dumps(result)
+
+
+def test_resolve_vault_lone_vault_fallback(tmp_path: Path) -> None:
+    """
+    With no usable ``default_vault`` and exactly one vault, MCP tools
+    fall back to the lone vault (HOPPUS-88).
+    """
+    root = tmp_path / "Vaults"
+    (root / "Solo").mkdir(parents=True)
+    cfg = default_config()
+    cfg["vaults_root"] = str(root)
+    cfg["default_vault"] = None
+    assert tools._resolve_vault(cfg) == root / "Solo"
+
+
+def test_resolve_vault_unset_default_with_several_raises(tmp_path: Path) -> None:
+    """
+    Several vaults and no default → ``VaultNotFound`` naming the
+    choices, not a crash on a None name (HOPPUS-88).
+    """
+    root = tmp_path / "Vaults"
+    (root / "Personal").mkdir(parents=True)
+    (root / "Work").mkdir()
+    cfg = default_config()
+    cfg["vaults_root"] = str(root)
+    cfg["default_vault"] = None
+    with pytest.raises(VaultNotFound) as excinfo:
+        tools._resolve_vault(cfg)
+    assert "choose one of" in str(excinfo.value)
+    assert "Personal" in str(excinfo.value)

@@ -379,3 +379,75 @@ class TestRunDoctor:
         assert report.editor_info.is_nvim is False
         assert report.plugin_detected is None
         assert report.nudge is None
+
+
+class TestRunDoctorConfigReporting:
+    """
+    Config-file path and load-error reporting (HOPPUS-87, HOPPUS-89).
+    """
+
+    def _run(self, **kwargs: Any) -> DoctorReport:
+        """
+        Run the doctor with hermetic deps plus per-test overrides.
+        """
+        defaults: dict[str, Any] = {
+            "environ": {"EDITOR": "emacs"},
+            "which": lambda name: None,
+            "home": lambda: Path("/fake/home"),
+            "glob": lambda pattern: [],
+            "discover": lambda path: [],
+        }
+        defaults.update(kwargs)
+        return run_doctor(_config(vaults_root="/fake/Notes"), **defaults)
+
+    def test_config_path_recorded(self) -> None:
+        """
+        The resolved config file path lands in the report (HOPPUS-89).
+        """
+        path = Path("/fake/xdg/hoppus/config.yaml")
+        assert self._run(config_path=path).config_path == path
+
+    def test_no_config_path_recorded_as_none(self) -> None:
+        """
+        With no config file found the report says so via None.
+        """
+        assert self._run().config_path is None
+
+    def test_config_error_becomes_first_warning(self) -> None:
+        """
+        A loader parse error marks the config unhealthy with the reason,
+        instead of crashing the doctor (HOPPUS-87).
+        """
+        report = self._run(config_error="Malformed config file: /x/config.yaml")
+        assert report.config_warnings[0].startswith("Malformed config file")
+
+    def test_default_vault_resolved_by_name(self) -> None:
+        """
+        The resolved default vault name is reported (HOPPUS-89).
+        """
+        vaults = [
+            Vault(name="Personal", path=Path("/n/Personal")),
+            Vault(name="Work", path=Path("/n/Work")),
+        ]
+        report = self._run(discover=lambda path: vaults)
+        assert report.default_vault == "Personal"
+
+    def test_lone_vault_used_when_default_unmatched(self) -> None:
+        """
+        With one vault and an unmatched configured default, the lone
+        vault becomes the resolved default (HOPPUS-88).
+        """
+        vault = Vault(name="Only", path=Path("/n/Only"))
+        report = self._run(discover=lambda path: [vault])
+        assert report.default_vault == "Only"
+
+    def test_unresolvable_default_reported_as_none(self) -> None:
+        """
+        Several vaults, none matching the configured default → None.
+        """
+        vaults = [
+            Vault(name="Alpha", path=Path("/n/Alpha")),
+            Vault(name="Beta", path=Path("/n/Beta")),
+        ]
+        report = self._run(discover=lambda path: vaults)
+        assert report.default_vault is None
