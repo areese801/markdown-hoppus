@@ -9,9 +9,10 @@ the note title, vault-relative path (HOPPUS-95), and word count into
 the app's reactive status-line state.
 
 Link resolution for clicked ``hoppus://`` links happens here too: the
-pane lazily builds an ``Index`` for its ``vault_root`` and resolves a
-decoded ``LinkTarget`` with a ``Resolver`` (spec §6.2). The app's
-``Markdown.LinkClicked`` handler calls :meth:`PreviewPane.open_target`.
+pane resolves a decoded ``LinkTarget`` with a ``Resolver`` built from
+the app's shared, always-fresh vault index (HOPPUS-118) — the pane
+never builds an index of its own. The app's ``Markdown.LinkClicked``
+handler calls :meth:`PreviewPane.open_target`.
 """
 
 from pathlib import Path
@@ -34,10 +35,15 @@ from hoppus.render.terminal import (
     select_renderer,
 )
 from hoppus.render.transclude import block_line, expand_embeds
+from hoppus.tui.keymap import (
+    DEFAULT_KEYMAP,
+    display_key,
+    resolve_keymap_overrides,
+)
 
 
-EMPTY_HINT = (
-    "No note open.\n\nPress ^o to open a note, or Enter on a file in the Explorer."
+EMPTY_HINT_TEMPLATE = (
+    "No note open.\n\nPress {key} to open a note, or Enter on a file in the Explorer."
 )
 
 
@@ -81,9 +87,31 @@ class PreviewPane(VerticalScroll):
 
     @vault_root.setter
     def vault_root(self, value: Path | None) -> None:
-        """Set the vault root and drop any index built for the old one."""
-        self._vault_root = Path(value) if value is not None else None
-        self._index = None
+        """
+        Set the vault root, dropping the shared index only on an ACTUAL
+        change (HOPPUS-118): re-assigning the same root must not
+        invalidate link resolution on every note open.
+        """
+        new_root = Path(value) if value is not None else None
+        if new_root != self._vault_root:
+            self._vault_root = new_root
+            self._index = None
+
+    @property
+    def index(self) -> Index | None:
+        """The shared vault index used for link resolution, or None."""
+        return self._index
+
+    @index.setter
+    def index(self, value: "Index | None") -> None:
+        """
+        Adopt the app's cached vault index (HOPPUS-118).
+
+        The app owns index building and freshness (incremental hot-path
+        updates plus the persistent cache); the preview only borrows a
+        reference for wikilink resolution and never builds its own.
+        """
+        self._index = value
 
     def compose(self) -> ComposeResult:
         """
@@ -91,7 +119,7 @@ class PreviewPane(VerticalScroll):
         """
         yield Markdown("", id="preview-markdown", open_links=False)
         yield Static("", id="preview-raw")
-        yield Static(EMPTY_HINT, id="preview-empty")
+        yield Static(self._empty_hint(), id="preview-empty")
 
     def on_mount(self) -> None:
         """
@@ -99,6 +127,23 @@ class PreviewPane(VerticalScroll):
         """
         self.query_one("#preview-raw", Static).display = False
         self._show_empty_hint(self.note_path is None)
+
+    def _empty_hint(self) -> str:
+        """
+        Render the no-note-open placeholder text (HOPPUS-78/117).
+
+        The quick-switcher key is pulled from the live keymap — the
+        defaults merged with any ``keymap:`` config overrides, the same
+        source the help overlay uses (HOPPUS-97) — so the hint stays
+        correct when the binding is remapped.
+
+        Returns:
+            The hint text naming the resolved quick-switcher key.
+        """
+        default_key, _description, _show = DEFAULT_KEYMAP["quick_switcher"]
+        overrides = resolve_keymap_overrides(self._config)
+        key = display_key(overrides.get("quick_switcher", default_key))
+        return EMPTY_HINT_TEMPLATE.format(key=key)
 
     def _relative_display(self, path: Path) -> str:
         """
@@ -232,27 +277,21 @@ class PreviewPane(VerticalScroll):
 
     # -- Link navigation ------------------------------------------------------
 
-    def _ensure_index(self) -> Index | None:
-        """
-        Lazily build (and cache) the vault index for link resolution.
-        """
-        if self._vault_root is None:
-            return None
-        if self._index is None:
-            self._index = Index.build(self._vault_root)
-        return self._index
-
     def _resolution_context(self) -> tuple[Resolver, "Link | None"] | None:
         """
         Build a ``Resolver`` (notes + attachments) and the current note.
 
+        Uses the app's shared vault index (HOPPUS-118) — the pane never
+        builds one of its own, so note opens stay O(note), not O(vault).
+
         Returns:
-            ``(resolver, current_note)``, or None when no vault root is
-            set. ``current_note`` is None when the active note is not in
-            the index (e.g. no note open yet).
+            ``(resolver, current_note)``, or None when no vault root or
+            shared index is set (e.g. the launch build is still in
+            flight). ``current_note`` is None when the active note is
+            not in the index (e.g. no note open yet).
         """
-        index = self._ensure_index()
-        if index is None:
+        index = self._index
+        if self._vault_root is None or index is None:
             return None
         resolver = index._make_resolver()
         current = (

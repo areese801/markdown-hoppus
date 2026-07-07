@@ -524,6 +524,12 @@ class HoppusApp(App[None]):
         pushes the total to the status line, and finally starts the
         live watcher (HOPPUS-77) so it can reuse the cached index.
 
+        When the vault changed while the build ran (HOPPUS-122), the
+        worker's result is stale: it is discarded and the active vault
+        is built instead, so a note opened mid-build gets its
+        backlinks, preview resolution, and problems count refreshed
+        without a manual reopen.
+
         Args:
             vault_root: The vault root the worker indexed.
             index: The built index, or None when the build failed or
@@ -532,12 +538,28 @@ class HoppusApp(App[None]):
             error: The build/audit failure, if any.
         """
         self._indexing = False
-        was_provisional = self._cache_provisional
+        active_root = self._active_vault_path()
+        rebuilt_for_switch = False
+        if error is None and vault_root != active_root:
+            # A vault switch raced the launch build (HOPPUS-122):
+            # rebuild for the active vault so the ready index matches
+            # what the user is looking at.
+            vault_root = active_root
+            index = None
+            report = None
+            if active_root.is_dir():
+                index = self._build_index(active_root)
+                rebuilt_for_switch = index is not None
+                if index is not None:
+                    try:
+                        report = integrity.audit_vault(index)
+                    except Exception:
+                        report = None
         if error is not None:
             self._set_problem_report(None)
             self._report_index_error(error)
         else:
-            if index is not None:
+            if index is not None and not rebuilt_for_switch:
                 # Atomic swap (HOPPUS-79): the fresh build replaces any
                 # provisional cached index in one assignment; the cache
                 # file was already rewritten by the worker.
@@ -548,7 +570,7 @@ class HoppusApp(App[None]):
                 self._cache_dirty = False
             self._set_problem_report(report)
         self._refresh_status_line()
-        if was_provisional and index is not None:
+        if index is not None:
             self._refresh_index_ui(vault_root, index)
         else:
             self._refresh_tags()
@@ -745,6 +767,10 @@ class HoppusApp(App[None]):
         file and the cached index — it never runs the O(vault) full
         audit. The ⚠ N problems count is seeded by the launch worker
         (HOPPUS-78) and kept correct incrementally as files change.
+        The preview borrows the app's cached index for wikilink
+        resolution (HOPPUS-118) instead of building its own, so opening
+        a note never triggers an O(vault) index build once the cache is
+        warm.
 
         Args:
             path: Path to the ``.md`` note.
@@ -754,18 +780,20 @@ class HoppusApp(App[None]):
         preview = self.preview
         if vault_root is not None:
             preview.vault_root = vault_root
+        root = vault_root if vault_root is not None else preview.vault_root
+        index: Index | None = None
+        if root is not None and root.is_dir():
+            index = self._active_index(root)
+        preview.index = index
         await preview.set_note(path)
         try:
             self.char_count = stats.count_chars(path.read_text(encoding="utf-8"))
         except OSError:
             self.char_count = None
-        root = vault_root if vault_root is not None else preview.vault_root
-        if root is not None and root.is_dir():
-            index = self._active_index(root)
-            if index is not None:
-                self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
-                    path, index, root
-                )
+        if root is not None and index is not None:
+            self.query_one("#backlinks-pane", BacklinksPane).show_backlinks(
+                path, index, root
+            )
         # D1 gate: opening a note is a report-only trigger by default —
         # the status-line indicator is the only surface. Only the escape
         # hatch (link_integrity.prompt_on = "always") may prompt here.
@@ -839,18 +867,27 @@ class HoppusApp(App[None]):
         """
         Refresh the index-derived panes after any index change.
 
-        Repopulates the open note's backlinks (the pane itself defers
-        the rebuild while a selection is mid-dispatch, HOPPUS-86),
-        repopulates the Tags pane (HOPPUS-98), and schedules an
-        Explorer tree reload so filesystem changes appear without a
-        restart (HOPPUS-90).
+        Hands the up-to-date index to the preview (HOPPUS-118) — when
+        the preview had none yet (a note opened while the launch/switch
+        build was still in flight, HOPPUS-122), the open note is
+        re-rendered so its wikilinks resolve against the now-ready
+        index. Repopulates the open note's backlinks (the pane itself
+        defers the rebuild while a selection is mid-dispatch,
+        HOPPUS-86), repopulates the Tags pane (HOPPUS-98), and
+        schedules an Explorer tree reload so filesystem changes appear
+        without a restart (HOPPUS-90).
 
         Args:
             vault_root: The active vault root.
             index: The up-to-date index.
         """
-        note_path = self.preview.note_path
+        preview = self.preview
+        preview_was_cold = preview.index is None
+        preview.index = index
+        note_path = preview.note_path
         if note_path is not None:
+            if preview_was_cold:
+                self.call_later(preview.set_note, Path(note_path))
             try:
                 pane = self.query_one("#backlinks-pane", BacklinksPane)
             except Exception:
@@ -1009,6 +1046,10 @@ class HoppusApp(App[None]):
         keybind remains the manual fallback (spec §8).
         """
         if not self.config.get("watcher", {}).get("enabled", True):
+            return
+        if self._watcher is not None:
+            # Already watching (a vault switch raced the launch worker,
+            # HOPPUS-122); never stack a second observer.
             return
         vault_root = self._active_vault_path()
         if not vault_root.is_dir():
